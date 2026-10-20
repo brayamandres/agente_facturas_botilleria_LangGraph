@@ -1,0 +1,25 @@
+# Archivos de entorno y credenciales (Seguridad)
+.env
+env.txt
+*.json
+
+# Entornos virtuales de Python
+venv/
+.venv/
+env/
+
+# Caché y archivos compilados de Python
+__pycache__/
+*.pyc
+
+# Carpetas de datos y documentos locales
+documentos/
+
+# Jupyter Notebooks (descomenta la siguiente línea si quieres ignorar TODOS los notebooks)
+# *.ipynb
+agente_factura.ipynb
+
+# Archivos del sistema u otro software
+.DS_Store
+Thumbs.db
+.vscode/
