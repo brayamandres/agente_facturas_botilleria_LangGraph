@@ -123,15 +123,15 @@ El agente dispone de **9 herramientas formales** construidas bajo el estándar `
 
 | Tipo | Herramienta | Archivo Fuente | Descripción |
 | :---: | :--- | :--- | :--- |
-| **Consulta** | `extraer_factura_desde_imagen` | [`src/tools/query_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/query_tools.py) | Extrae folio, proveedor e ítems detallados usando visión multimodal de Gemini. |
-| **Consulta** | `consultar_duplicidad_factura` | [`src/tools/query_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/query_tools.py) | Verifica en Firestore si el folio y proveedor ya fueron procesados previamente. |
-| **Consulta** | `buscar_candidatos_vectoriales` | [`src/tools/query_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/query_tools.py) | Búsqueda semántica (Top 3) mediante distancia de coseno en el catálogo vectorial. |
-| **Consulta** | `consultar_producto_por_sku` | [`src/tools/query_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/query_tools.py) | Inspecciona stock, costos y precios actuales de un producto en Firestore. |
-| **Razonamiento** | `razonar_homologacion` | [`src/tools/reasoning_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/reasoning_tools.py) | Razona sobre abreviaturas de licores chilenos y asigna SKU con nivel de confianza. |
-| **Razonamiento** | `evaluar_variacion_costo` | [`src/tools/reasoning_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/reasoning_tools.py) | Detecta aumentos abruptos de costo ($>15\%$) para sugerir ajustes al precio de venta. |
-| **Escritura** | `actualizar_stock_y_costo` | [`src/tools/write_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/write_tools.py) | Actualiza atómicamente el stock sumando unidades y ajusta costos en Firestore. |
-| **Escritura** | `registrar_nuevo_producto` | [`src/tools/write_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/write_tools.py) | Da de alta un SKU nuevo generando su vector de 384 dimensiones de inmediato. |
-| **Escritura** | `registrar_auditoria_factura` | [`src/tools/write_tools.py`](file:///c:/Users/braya/OneDrive/Documentos/GitHub/agente_facturas_botilleria/src/tools/write_tools.py) | Guarda el comprobante transaccional en la colección `historial_facturas`. |
+| **Consulta** | `extraer_factura_desde_imagen` | `src/tools/query_tools.py` | Extrae folio, proveedor e ítems detallados usando visión multimodal de Gemini. |
+| **Consulta** | `consultar_duplicidad_factura` | `src/tools/query_tools.py` | Verifica en Firestore si el folio y proveedor ya fueron procesados previamente. |
+| **Consulta** | `buscar_candidatos_vectoriales` | `src/tools/query_tools.py` | Búsqueda semántica (Top 3) mediante distancia de coseno en el catálogo vectorial. |
+| **Consulta** | `consultar_producto_por_sku` | `src/tools/query_tools.py` | Inspecciona stock, costos y precios actuales de un producto en Firestore. |
+| **Razonamiento** | `razonar_homologacion` | `src/tools/reasoning_tools.py` | Razona sobre abreviaturas de licores chilenos y asigna SKU con nivel de confianza. |
+| **Razonamiento** | `evaluar_variacion_costo` | `src/tools/reasoning_tools.py` | Detecta aumentos abruptos de costo ($>15\%$) para sugerir ajustes al precio de venta. |
+| **Escritura** | `actualizar_stock_y_costo` | `src/tools/write_tools.py` | Actualiza atómicamente el stock sumando unidades y ajusta costos en Firestore. |
+| **Escritura** | `registrar_nuevo_producto` | `src/tools/write_tools.py` | Da de alta un SKU nuevo generando su vector de 384 dimensiones de inmediato. |
+| **Escritura** | `registrar_auditoria_factura` | `src/tools/write_tools.py` | Guarda el comprobante transaccional en la colección `historial_facturas`. |
 
 ---
 
@@ -158,14 +158,14 @@ El sistema cuenta con instrumentación nativa de **LangSmith**:
 ## 7. Instalación y Configuración
 
 ### 1. Requisitos Previos
-* Python 3.10 o 3.11.
+* Python.
 * Cuenta y proyecto activo en Google Firebase Firestore.
 * Clave de API de Google Gemini (`GOOGLE_API_KEY`).
 * Clave de API de Groq (`GROQ_API_KEY`) o de OpenAI (`OPENAI_API_KEY`).
 
 ### 2. Clonación e Instalación
 ```bash
-git clone https://github.com/brayan-soto-g/agente_facturas_botilleria.git
+git clone https://github.com/brayamandres/agente_facturas_botilleria.git
 cd agente_facturas_botilleria
 pip install -r requirements.txt
 ```

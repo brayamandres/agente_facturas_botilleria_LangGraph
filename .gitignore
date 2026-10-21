@@ -23,3 +23,11 @@ agente_factura.ipynb
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Carpeta de imagenes optimizadas
+optimizado/
+
+# Ignora imagenes agregadas, menos la factura1.png
+!factura1.png
+*.png
+*.jpg

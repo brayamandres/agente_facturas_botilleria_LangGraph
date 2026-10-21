@@ -9,6 +9,12 @@ def get_firestore_client():
     """
     Retorna la instancia del cliente de Firestore (Singleton).
     Inicializa Firebase Admin SDK si no ha sido inicializado.
+    
+    Args:
+        None
+        
+    Returns:
+        firestore.Client: Instancia del cliente de Firestore.
     """
     global _firestore_client
     if _firestore_client is not None:
@@ -39,13 +45,29 @@ def get_firestore_client():
 
 
 def get_productos_collection():
-    """Retorna la referencia a la colección 'productos'."""
+    """
+    Retorna la referencia a la colección 'productos'.
+    
+    Args:
+        None
+    
+    Returns:
+        firestore.CollectionReference: Referencia a la colección 'productos' en Firestore.
+    """
     db = get_firestore_client()
     return db.collection("productos")
 
 
 def get_historial_collection():
-    """Retorna la referencia a la colección 'historial_facturas' para memoria de largo plazo."""
+    """
+    Retorna la referencia a la colección 'historial_facturas' para memoria de largo plazo.
+    
+    Args:
+        None
+    
+    Returns:
+        firestore.CollectionReference: Referencia a la colección 'historial_facturas' en Firestore.
+    """
     db = get_firestore_client()
     return db.collection("historial_facturas")
 

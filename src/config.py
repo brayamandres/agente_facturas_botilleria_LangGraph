@@ -34,4 +34,3 @@ EMBEDDING_DIMENSIONS = 384
 # Configuración de modelos de IA
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_GEMINI_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
-

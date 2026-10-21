@@ -17,6 +17,12 @@ def sembrar_catalogo_inicial(forzar_recalculo: bool = False):
     """
     Inserta o actualiza los 40 productos iniciales en Firestore.
     Calcula los embeddings vectoriales para habilitar la búsqueda semántica.
+    
+    Args:
+        forzar_recalculo (bool): Si es True, recalcula los embeddings incluso si ya existen.
+    
+    Returns:
+        None
     """
     if not DATA_FILE.exists():
         raise FileNotFoundError(f"No se encontró el archivo de datos: {DATA_FILE}")

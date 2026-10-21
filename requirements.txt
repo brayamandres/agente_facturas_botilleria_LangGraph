@@ -10,3 +10,4 @@ sentence-transformers
 groq
 pillow
 python-dotenv
+colorist
