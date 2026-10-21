@@ -9,19 +9,24 @@ from google.cloud.firestore_v1.vector import Vector
 from src.services.firebase import get_productos_collection, get_historial_collection
 from src.services.embeddings import generar_embedding
 
-#TOOLS
-
-#PARA ACTUALIZAR FIREBASE
 @tool
 def actualizar_stock_y_costo(
-    sku: str,
-    cantidad: int,
-    nuevo_costo: float,
-    nuevo_precio_venta: float = None
-) -> dict:
+    sku,
+    cantidad,
+    nuevo_costo,
+    nuevo_precio_venta = None):
     """
     Actualiza el stock actual sumando la cantidad comprada y actualiza el precio de costo del producto en Firestore.
     Opcionalmente puede actualizar también el precio de venta al público.
+    
+    Args:
+        sku (str): SKU del producto a actualizar.
+        cantidad (int): Cantidad de unidades compradas para sumar al stock actual.
+        nuevo_costo (float): Nuevo precio de costo unitario del producto.
+        nuevo_precio_venta (float | None, optional): Nuevo precio de venta al público (opcional).
+        
+    Returns:
+        dict: Diccionario con el resultado de la operación, incluyendo el nuevo stock y precios.
     """
     productos_ref = get_productos_collection()
     doc_ref = productos_ref.document(sku)
@@ -62,20 +67,35 @@ def actualizar_stock_y_costo(
 
 @tool
 def registrar_nuevo_producto(
-    sku: str,
-    nombre: str,
-    marca: str,
-    categoria: str,
-    subcategoria: str,
-    formato: str,
-    precio_costo: float,
-    precio_venta: float,
-    stock_inicial: int,
-    stock_minimo: int = 6
-) -> dict:
+    sku,
+    nombre,
+    marca,
+    categoria,
+    subcategoria,
+    formato,
+    precio_costo,
+    precio_venta,
+    stock_inicial,
+    stock_minimo = 6
+):
     """
     Da de alta un nuevo producto en Firestore generando su vector de embedding para que
     pueda ser localizado en futuras búsquedas semánticas.
+    
+    Args:
+        sku (str): SKU único del producto.
+        nombre (str): Nombre del producto.
+        marca (str): Marca del producto.
+        categoria (str): Categoría del producto.
+        subcategoria (str): Subcategoría del producto.
+        formato (str): Formato del producto (ej. "Botella 750ml").
+        precio_costo (float): Precio de costo unitario del producto.
+        precio_venta (float): Precio de venta al público unitario del producto.
+        stock_inicial (int): Stock inicial del producto.
+        stock_minimo (int, optional): Stock mínimo recomendado para alertas. Default es 6.
+        
+    Returns:
+        dict: Diccionario con el resultado de la operación, incluyendo el SKU y mensaje de éxito o error.
     """
     productos_ref = get_productos_collection()
     doc_ref = productos_ref.document(sku)
@@ -120,15 +140,25 @@ def registrar_nuevo_producto(
 
 @tool
 def registrar_auditoria_factura(
-    folio: str,
-    proveedor: str,
-    total_items: int,
-    items_procesados: list[dict],
-    estado: str = "COMPLETADO"
-) -> dict:
+    folio,
+    proveedor,
+    total_items,
+    items_procesados,
+    estado = "COMPLETADO"
+):
     """
     Registra el procesamiento de una factura en la colección 'historial_facturas' de Firestore
     como memoria episódica/transaccional a largo plazo para auditoría y control de duplicados.
+    
+    Args:
+        folio (str): Folio o número de la factura.
+        proveedor (str): Nombre del proveedor de la factura.
+        total_items (int): Total de ítems en la factura.
+        items_procesados (list[dict]): Lista de ítems procesados con sus detalles.
+        estado (str, optional): Estado del procesamiento de la factura. Default es "COMPLETADO".
+        
+    Returns:
+        dict: Diccionario con el resultado de la operación, incluyendo el ID de auditoría y mensaje.
     """
     historial_ref = get_historial_collection()
     

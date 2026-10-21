@@ -5,6 +5,7 @@ Permiten recuperar información de Firestore: duplicados, búsqueda vectorial se
 from langchain_core.tools import tool
 from google.cloud.firestore_v1.vector import Vector
 from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from src.services.firebase import get_productos_collection, get_historial_collection
 from src.services.embeddings import generar_embedding
@@ -12,63 +13,100 @@ from src.services.gemini import extraer_datos_factura
 
 
 @tool
-def extraer_factura_desde_imagen(ruta_imagen: str) -> dict:
+def extraer_factura_desde_imagen(ruta_imagen):
     """
     Extrae de forma estructurada los datos de una factura de compra (proveedor, número de folio
     y lista de ítems detallados con glosa, formato, cantidad y precio unitario) a partir de una
     imagen (PNG o JPG) utilizando visión multimodal con Google Gemini.
+    
+    Args:
+        ruta_imagen (str): Ruta local o URL de la imagen de la factura a procesar.
+        
+    Returns:
+        dict: Diccionario con los datos extraídos de la factura, incluyendo proveedor, folio y lista de ítems.
     """
     # Llama al servicio de Gemini para procesar visualmente la factura y devolver un JSON estructurado
     return extraer_datos_factura(ruta_imagen)
 
 
 @tool
-def consultar_duplicidad_factura(folio: str, proveedor: str) -> dict:
+def consultar_duplicidad_factura(folio = None, proveedor = None):
     """
     Verifica en el historial de Firestore si la factura ya fue procesada anteriormente
     para evitar doble contabilización en el inventario.
 
+    Args:
+        folio (str | None): Folio o número de la factura a verificar (opcional).
+        proveedor (str | None): Nombre del proveedor de la factura a verificar (opcional).
+        
+    Returns:
+        dict: Diccionario con la clave "es_duplicada" (True/False) y un mensaje explicativo.
     """
-    #si es que no se registra el folio de la factura
-    if not folio:
-        return {"es_duplicada": False, "mensaje": "Folio no especificado, no se puede verificar duplicidad."}
-
-    #se guarda en una variable la colección historica de facturas ingresadas
-    historial_ref = get_historial_collection()
-    #se comienza a formular la consulta, primero pregunta si el folio nuevo se encuentra en los registros de la bbdd y si se registra proveedor, también se agrega a la consulta
-    query = historial_ref.where("folio", "==", str(folio))
-    if proveedor:
-        query = query.where("proveedor", "==", str(proveedor))
-
-    #se envia la consulta y los resultados se almacenan
-    docs = list(query.stream())
-    #dependiendo si encuentra o no algo, retorna un Json con la respuesta
-    if docs:
-        datos = docs[0].to_dict()
+    # Si no se registra el folio de la factura o no es legible, continuar el flujo
+    folio_limpio = str(folio).strip() if folio is not None else ""
+    if not folio_limpio or folio_limpio.lower() in ["none", "null", "s/f", "n/a"]:
         return {
-            "es_duplicada": True,
-            "mensaje": f"La factura folio '{folio}' de '{proveedor}' ya fue registrada previamente.",
-            "registro_existente": {
-                "id": docs[0].id,
-                "fecha": str(datos.get("fecha_procesamiento")),
-                "total_items": datos.get("total_items", 0)
-            }
+            "es_duplicada": False,
+            "mensaje": "Folio no especificado o ilegible, no se puede verificar duplicidad. Se continúa con el procesamiento."
         }
-    
-    return {"es_duplicada": False, "mensaje": f"Factura folio '{folio}' es nueva y no está duplicada."}
+
+    try:
+        # Se guarda en una variable la colección histórica de facturas ingresadas
+        historial_ref = get_historial_collection()
+        query = historial_ref.where(filter=FieldFilter("folio", "==", folio_limpio))
+
+        proveedor_limpio = str(proveedor).strip() if proveedor is not None else ""
+        if proveedor_limpio and proveedor_limpio.lower() not in ["none", "null", "desconocido", "n/a"]:
+            query = query.where(filter=FieldFilter("proveedor", "==", proveedor_limpio))
+
+        # Se envía la consulta y los resultados se almacenan
+        docs = list(query.stream())
+        # Dependiendo si encuentra o no algo, retorna un JSON con la respuesta
+        if docs:
+            datos = docs[0].to_dict()
+            return {
+                "es_duplicada": True,
+                "mensaje": f"La factura folio '{folio_limpio}' de '{proveedor_limpio or 'Proveedor desconocido'}' ya fue registrada previamente.",
+                "registro_existente": {
+                    "id": docs[0].id,
+                    "fecha": str(datos.get("fecha_procesamiento")),
+                    "total_items": datos.get("total_items", 0)
+                }
+            }
+
+        return {"es_duplicada": False, "mensaje": f"Factura folio '{folio_limpio}' es nueva y no está duplicada."}
+    except Exception as e:
+        return {
+            "es_duplicada": False,
+            "mensaje": f"No fue posible verificar duplicidad en Firestore ({e}). Se continúa para agregar los productos."
+        }
 
 
 @tool
-def buscar_candidatos_vectoriales(glosa: str, formato: str = "", top_k: int = 3) -> list[dict]:
+def buscar_candidatos_vectoriales(glosa = None, formato = None, top_k = 3):
     """
     Realiza una búsqueda semántica de los productos más cercanos en Firestore
     comparando el vector de la glosa de la factura contra los embeddings del catálogo interno.
+    
+    Args:
+        glosa (str | None): Glosa de la línea de factura a buscar.
+        formato (str | None): Formato detectado de la línea de factura (opcional).
+        top_k (int, optional): Número máximo de candidatos a retornar. Default es 3.
+    
+    Returns:
+        list[dict]: Lista de diccionarios con los productos candidatos más similares, incluyendo SKU, nombre, marca, formato y precios actuales.
     """
-    #se formatean las entradas y se vectorizan
-    texto_busqueda = f"{glosa} {formato or ''}".strip()
+    # Se formatean las entradas y se vectorizan de forma segura ante valores nulos/ilegibles
+    glosa_limpia = str(glosa).strip() if glosa and str(glosa).strip().lower() != "null" else ""
+    formato_limpio = str(formato).strip() if formato and str(formato).strip().lower() != "null" else ""
+    
+    if not glosa_limpia:
+        return []
+
+    texto_busqueda = f"{glosa_limpia} {formato_limpio}".strip()
     vector_query = generar_embedding(texto_busqueda)
 
-    #se extraen los k=3  productos vectorialmente mas similares
+    # Se extraen los k=3 productos vectorialmente más similares
     productos_ref = get_productos_collection()
     query_vectorial = productos_ref.find_nearest(
         vector_field="embedding",
@@ -90,14 +128,20 @@ def buscar_candidatos_vectoriales(glosa: str, formato: str = "", top_k: int = 3)
             "stock_actual": data.get("stock_actual", 0)
         })
 
-    #retorna los 3 productos candidatos con sus caracteristicas organizado en json
+    # Retorna los 3 productos candidatos con sus características organizado en JSON
     return candidatos
 
 
 @tool
-def consultar_producto_por_sku(sku: str) -> dict:
+def consultar_producto_por_sku(sku):
     """
     Obtiene los datos completos de un producto específico en Firestore mediante su SKU.
+    
+    Args:
+        sku (str): SKU del producto a consultar.
+    
+    Returns:
+        dict: Diccionario con la clave "encontrado" (True/False) y los datos del producto si se encuentra, o un mensaje de error si no.
     """
     productos_ref = get_productos_collection()
     doc = productos_ref.document(sku).get()
@@ -108,4 +152,3 @@ def consultar_producto_por_sku(sku: str) -> dict:
         data.pop("embedding", None)
         return {"encontrado": True, "producto": data}
     return {"encontrado": False, "mensaje": f"No se encontró el producto con SKU '{sku}'"}
-

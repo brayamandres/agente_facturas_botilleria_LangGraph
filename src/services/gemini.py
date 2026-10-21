@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from PIL import Image
+from colorist import BgColor
 from google import genai
 from google.genai import types
 
@@ -45,10 +46,16 @@ def get_gemini_client():
     return _gemini_client
 
 
-def preprocesar_imagen_factura(ruta_imagen: str | Path, max_size=(1280, 720)) -> Path:
+def preprocesar_imagen_factura(ruta_imagen, max_size=(1280, 720)):
     """
     Optimiza la imagen de la factura redimensionándola manteniendo el aspect ratio
     para reducir consumo de ancho de banda y latencia sin perder legibilidad OCR.
+    
+    Args:
+        ruta_imagen (str | Path): Ruta local o URL de la imagen de la factura.
+        max_size (tuple[int, int], optional): Tamaño máximo (ancho, alto) para redimensionar. Default es (1280, 720).
+    Returns:
+        Path: Ruta de la imagen optimizada.
     """
     ruta_original = Path(ruta_imagen)
     if not ruta_original.exists():
@@ -62,9 +69,14 @@ def preprocesar_imagen_factura(ruta_imagen: str | Path, max_size=(1280, 720)) ->
     return ruta_salida
 
 
-def extraer_datos_factura(ruta_imagen: str | Path) -> dict:
+def extraer_datos_factura(ruta_imagen):
     """
     Lee visualmente la factura con Gemini y devuelve los datos estructurados en un diccionario.
+    
+    Args:
+        ruta_imagen (str | Path): Ruta local o URL de la imagen de la factura a procesar.
+    Returns:
+        dict: Diccionario con los datos extraídos de la factura, incluyendo proveedor, número de factura y lista de ítems.
     """
     ruta_optimizada = preprocesar_imagen_factura(ruta_imagen)
     imagen = Image.open(ruta_optimizada)
@@ -76,12 +88,14 @@ def extraer_datos_factura(ruta_imagen: str | Path) -> dict:
                 model=modelo,
                 contents=[PROMPT_EXTRACCION, imagen],
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
+                    response_mime_type="application/json",
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    )
                 )
             )
             return json.loads(respuesta.text)
         except Exception as e:
-            print(f"[Gemini Service] Aviso en modelo '{modelo}': {e}. Probando siguiente modelo...")
+            print(f"{BgColor.WHITE}[Gemini Service]{BgColor.OFF} Aviso en modelo '{modelo}': {e}. Probando siguiente modelo...")
 
     raise RuntimeError("No fue posible extraer los datos de la factura con los modelos de Gemini configurados.")
-

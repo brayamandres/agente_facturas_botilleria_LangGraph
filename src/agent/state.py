@@ -11,6 +11,12 @@ from typing import TypedDict, Optional, List, Dict, Any
 class AgentState(TypedDict):
     """
     Estado global del flujo de trabajo del agente de facturas.
+    
+    Args:
+        TypedDict
+        
+    Returns:
+        AgentState: Diccionario tipado que representa el estado del agente.
     """
     # 1. Datos de entrada
 

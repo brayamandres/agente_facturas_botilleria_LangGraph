@@ -39,13 +39,19 @@ Responde ÚNICAMENTE en formato JSON con la siguiente estructura:
 ])
 #########################################################################################
 
-#TOOLS
-
 @tool
-def razonar_homologacion(glosa_factura: str, formato_factura: str, candidatos: list[dict]) -> dict:
+def razonar_homologacion(glosa_factura, formato_factura  = None, candidatos = None):
     """
     Utiliza el LLM para razonar sobre abreviaciones y similitudes entre una glosa de factura y los candidatos recuperados.
     Retorna el SKU seleccionado, nivel de confianza (0.0 a 1.0), justificación y si requiere revisión humana.
+    
+    Args:
+        glosa_factura (str): Glosa de la línea de factura a homologar.
+        formato_factura (str | None): Formato detectado de la línea de factura (opcional).
+        candidatos (list[dict] | None): Lista de candidatos del catálogo para comparar (opcional).
+        
+    Returns:
+        dict: Diccionario con las claves "glosa_factura", "formato_factura" y "candidatos".
     """
     llm = get_reasoning_llm(temperature=0.0)
     cadena = PROMPT_HOMOLOGACION | llm | JsonOutputParser()
@@ -53,16 +59,23 @@ def razonar_homologacion(glosa_factura: str, formato_factura: str, candidatos: l
     resultado = cadena.invoke({
         "glosa_factura": glosa_factura,
         "formato_factura": formato_factura or "No especificado",
-        "candidatos": json.dumps(candidatos, indent=2, ensure_ascii=False)
+        "candidatos": json.dumps(candidatos or [], indent=2, ensure_ascii=False)
     })
     return resultado
 
 
 @tool
-def evaluar_variacion_costo(costo_factura: float, costo_actual: float, umbral_alerta: float = 0.15) -> dict:
-    """
-    Evalúa la variación porcentual entre el costo nuevo de la factura y el costo actual del catálogo.
+def evaluar_variacion_costo(costo_factura, costo_actual, umbral_alerta = 0.15): 
+    """Evalúa la variación porcentual entre el costo nuevo de la factura y el costo actual del catálogo.
     Si la variación supera el umbral (por defecto 15%), genera una alerta para revisar el precio de venta.
+
+    Args:
+        costo_factura (float): Costo unitario de la línea de factura.
+        costo_actual (float): Costo unitario actual registrado en el catálogo.
+        umbral_alerta (float, optional): Porcentaje de variación que dispara la alerta. Default con 0.15.
+        
+    Returns:
+        dict: Diccionario con la alerta, variación porcentual, diferencia en pesos y mensaje de recomendación.
     """
     if costo_actual <= 0:
         return {
@@ -88,4 +101,3 @@ def evaluar_variacion_costo(costo_factura: float, costo_actual: float, umbral_al
         "diferencia_pesos": diferencia,
         "mensaje": mensaje
     }
-

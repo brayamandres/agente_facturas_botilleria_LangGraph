@@ -19,11 +19,6 @@ from src.services.firebase import get_productos_collection, get_historial_collec
 from src.services.seed import sembrar_catalogo_inicial
 
 
-def limpiar_pantalla():
-    """Limpia la terminal según el sistema operativo."""
-    os.system("cls" if os.name == "nt" else "clear")
-
-
 def imprimir_banner():
     """Muestra el banner de presentación del agente."""
     print("=" * 75)
@@ -40,7 +35,7 @@ def listar_facturas_disponibles():
     return [f for f in os.listdir(DATA_DIR) if f.lower().endswith(extensiones) and os.path.isfile(DATA_DIR / f)]
 
 
-def ejecutar_agente_factura(ruta_imagen: Path):
+def ejecutar_agente_factura(ruta_imagen):
     """
     Ejecuta el grafo compilado de LangGraph con un thread_id único para la sesión.
     """
@@ -85,17 +80,17 @@ def ejecutar_agente_factura(ruta_imagen: Path):
         print("Verifica que las credenciales en .env y los servicios de Firebase/Gemini estén correctamente configurados.")
 
 
-def imprimir_resumen_final(estado: dict):
+def imprimir_resumen_final(estado):
     """Muestra un resumen estructurado al finalizar el procesamiento."""
     print("\n" + "=" * 75)
     print("                    REPORTE CONSOLIDADO DEL AGENTE")
     print("=" * 75)
 
     datos = estado.get("datos_factura") or {}
-    print(f" Proveedor:          {datos.get('proveedor', 'N/A')}")
-    print(f" Folio Factura:      {datos.get('numero_factura', 'N/A')}")
+    print(f" Proveedor:          {datos.get('proveedor') or 'N/A'}")
+    print(f" Folio Factura:      {datos.get('numero_factura') or 'N/A'}")
     print(f" Estado Final:       {estado.get('estado_final')}")
-    print(f" Auditoría ID:       {estado.get('auditoria_id', 'No generado')}")
+    print(f" Auditoría ID:       {estado.get('auditoria_id') or 'No generado'}")
 
     items = estado.get("items_procesados", [])
     print(f" Ítems procesados:   {len(items)}")
@@ -174,11 +169,18 @@ def ver_historial_auditoria():
 
 def menu_principal():
     """Despliega el menú interactivo para el usuario y evaluadores."""
+    ultima_factura_procesada = None
+
     while True:
         imprimir_banner()
+        etiqueta_dup = (
+            f"Re-procesar última factura: '{ultima_factura_procesada.name}'"
+            if ultima_factura_procesada
+            else "Re-procesar misma factura"
+        )
         print("Selecciona una opción:")
         print("  1. Procesar una factura (Ejecutar Agente LangGraph)")
-        print("  2. Probar control de duplicados (Re-procesar misma factura)")
+        print(f"  2. Probar control de duplicados ({etiqueta_dup})")
         print("  3. Visualizar inventario en Firestore")
         print("  4. Consultar historial de auditoría (Memoria de largo plazo)")
         print("  5. Sembrar / Indexar catálogo inicial con Embeddings en Firestore")
@@ -205,6 +207,7 @@ def menu_principal():
             else:
                 ruta_seleccionada = DATA_DIR / facturas[0]
 
+            ultima_factura_procesada = ruta_seleccionada
             ejecutar_agente_factura(ruta_seleccionada)
             input("\nPresiona Enter para volver al menú...")
 
@@ -212,9 +215,23 @@ def menu_principal():
             facturas = listar_facturas_disponibles()
             if not facturas:
                 print(f"\n⚠️ No hay facturas en '{DATA_DIR}'.")
+            elif ultima_factura_procesada and ultima_factura_procesada.exists():
+                print(f"\nRe-procesando última factura procesada ('{ultima_factura_procesada.name}') para demostrar el bloqueo adaptativo ante duplicados...")
+                ejecutar_agente_factura(ultima_factura_procesada)
             else:
-                print(f"\nRe-procesando '{facturas[0]}' para demostrar el bloqueo adaptativo ante duplicados...")
-                ejecutar_agente_factura(DATA_DIR / facturas[0])
+                print("\nNo se ha procesado ninguna factura en esta sesión aún. Selecciona cuál deseas probar:")
+                for idx, f in enumerate(facturas, start=1):
+                    print(f"  [{idx}] {f}")
+                seleccion = input(f"\nSelecciona una factura (1-{len(facturas)}) o presiona Enter para usar '{facturas[0]}': ").strip()
+                if seleccion.isdigit() and 1 <= int(seleccion) <= len(facturas):
+                    ruta_seleccionada = DATA_DIR / facturas[int(seleccion) - 1]
+                else:
+                    ruta_seleccionada = DATA_DIR / facturas[0]
+
+                ultima_factura_procesada = ruta_seleccionada
+                print(f"\nRe-procesando '{ruta_seleccionada.name}' para demostrar el bloqueo adaptativo ante duplicados...")
+                ejecutar_agente_factura(ruta_seleccionada)
+
             input("\nPresiona Enter para volver al menú...")
 
         elif opcion == "3":
@@ -242,4 +259,3 @@ def menu_principal():
 
 if __name__ == "__main__":
     menu_principal()
-
