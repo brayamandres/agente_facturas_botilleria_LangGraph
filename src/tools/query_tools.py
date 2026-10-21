@@ -40,14 +40,15 @@ def consultar_duplicidad_factura(folio = None, proveedor = None):
         proveedor (str | None): Nombre del proveedor de la factura a verificar (opcional).
         
     Returns:
-        dict: Diccionario con la clave "es_duplicada" (True/False) y un mensaje explicativo.
+        dict: Diccionario con "es_duplicada", "estado_verificacion" y un mensaje explicativo.
     """
-    # Si no se registra el folio de la factura o no es legible, continuar el flujo
+    # Caso 1: Folio no especificado o ilegible -> se continúa sin verificar duplicidad
     folio_limpio = str(folio).strip() if folio is not None else ""
     if not folio_limpio or folio_limpio.lower() in ["none", "null", "s/f", "n/a"]:
         return {
             "es_duplicada": False,
-            "mensaje": "Folio no especificado o ilegible, no se puede verificar duplicidad. Se continúa con el procesamiento."
+            "estado_verificacion": "FOLIO_ILEGIBLE",
+            "mensaje": "Folio no especificado o ilegible. Se continúa sin verificar duplicidad."
         }
 
     try:
@@ -61,11 +62,11 @@ def consultar_duplicidad_factura(folio = None, proveedor = None):
 
         # Se envía la consulta y los resultados se almacenan
         docs = list(query.stream())
-        # Dependiendo si encuentra o no algo, retorna un JSON con la respuesta
         if docs:
             datos = docs[0].to_dict()
             return {
                 "es_duplicada": True,
+                "estado_verificacion": "DUPLICADA",
                 "mensaje": f"La factura folio '{folio_limpio}' de '{proveedor_limpio or 'Proveedor desconocido'}' ya fue registrada previamente.",
                 "registro_existente": {
                     "id": docs[0].id,
@@ -74,11 +75,19 @@ def consultar_duplicidad_factura(folio = None, proveedor = None):
                 }
             }
 
-        return {"es_duplicada": False, "mensaje": f"Factura folio '{folio_limpio}' es nueva y no está duplicada."}
-    except Exception as e:
+        # Caso 2: Folio legible y verificado sin coincidencias
         return {
             "es_duplicada": False,
-            "mensaje": f"No fue posible verificar duplicidad en Firestore ({e}). Se continúa para agregar los productos."
+            "estado_verificacion": "VERIFICADA_NUEVA",
+            "mensaje": f"Factura folio '{folio_limpio}' es nueva y no está duplicada."
+        }
+    except Exception as e:
+        # Caso 3: Error real de conexión o consulta a Firestore -> reportar fallo de verificación
+        return {
+            "es_duplicada": None,
+            "estado_verificacion": "ERROR_CONSULTA",
+            "error": str(e),
+            "mensaje": f"Error al consultar duplicidad en Firestore: {e}"
         }
 
 
@@ -108,17 +117,26 @@ def buscar_candidatos_vectoriales(glosa = None, formato = None, top_k = 3):
 
     # Se extraen los k=3 productos vectorialmente más similares
     productos_ref = get_productos_collection()
-    query_vectorial = productos_ref.find_nearest(
-        vector_field="embedding",
-        query_vector=Vector(vector_query),
-        distance_measure=DistanceMeasure.COSINE,
-        limit=top_k
-    )
+    try:
+        query_vectorial = productos_ref.find_nearest(
+            vector_field="embedding",
+            query_vector=Vector(vector_query),
+            distance_measure=DistanceMeasure.COSINE,
+            limit=top_k,
+            distance_result_field="distancia_coseno"
+        )
+    except TypeError:
+        query_vectorial = productos_ref.find_nearest(
+            vector_field="embedding",
+            query_vector=Vector(vector_query),
+            distance_measure=DistanceMeasure.COSINE,
+            limit=top_k
+        )
 
     candidatos = []
     for doc in query_vectorial.get():
         data = doc.to_dict()
-        candidatos.append({
+        item_cand = {
             "sku": doc.id,
             "nombre": data.get("nombre", ""),
             "marca": data.get("marca", ""),
@@ -126,7 +144,11 @@ def buscar_candidatos_vectoriales(glosa = None, formato = None, top_k = 3):
             "precio_costo_actual": data.get("precio_costo", 0),
             "precio_venta_actual": data.get("precio_venta", 0),
             "stock_actual": data.get("stock_actual", 0)
-        })
+        }
+        distancia = data.get("distancia_coseno")
+        if isinstance(distancia, (int, float)):
+            item_cand["similitud_vectorial"] = round(max(0.0, min(1.0, 1.0 - float(distancia))), 4)
+        candidatos.append(item_cand)
 
     # Retorna los 3 productos candidatos con sus características organizado en JSON
     return candidatos

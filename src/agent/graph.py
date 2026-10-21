@@ -14,6 +14,7 @@ from colorist import BgColor, green, yellow, red
 
 
 from src.agent.state import AgentState
+from src.tools.reasoning_tools import validar_respuesta_homologacion
 from src.tools import (
     extraer_factura_desde_imagen,
     consultar_duplicidad_factura,
@@ -28,7 +29,7 @@ from src.tools import (
 
 
 # ============================================================================
-# FUNCIONES AUXILIARES DE VALIDACIÓN DE LEGIBILIDAD
+# FUNCIONES AUXILIARES DE VALIDACIÓN DE LEGIBILIDAD Y UNIDADES
 # ============================================================================
 
 def _limpiar_texto(valor: Any) -> str:
@@ -124,28 +125,41 @@ def node_verificar_duplicidad(state):
     print(f"{BgColor.YELLOW}[Agente - Verificación]{BgColor.OFF} Comprobando duplicidad para folio '{folio}' de '{proveedor}'...")
     resultado = consultar_duplicidad_factura.invoke({"folio": folio, "proveedor": proveedor})
 
-    es_duplicada = resultado.get("es_duplicada", False)
+    es_duplicada = bool(resultado.get("es_duplicada", False))
+    estado_verificacion = resultado.get("estado_verificacion", "")
     msg = resultado.get("mensaje", "")
     print(f" -> {msg}")
 
-    return {
+    actualizacion = {
         "es_duplicada": es_duplicada,
         "info_duplicada": resultado.get("registro_existente"),
         "mensajes_bitacora": state["mensajes_bitacora"] + [msg]
     }
+    if estado_verificacion == "ERROR_CONSULTA" or resultado.get("es_duplicada") is None:
+        actualizacion["estado_final"] = "ERROR"
+
+    return actualizacion
 
 
 def node_manejar_duplicada(state):
     """
-    Nodo Alternativo: Detiene el flujo adaptativamente si la factura ya existe,
-    evitando la doble contabilización en inventario.
+    Nodo Alternativo: Detiene el flujo adaptativamente si la factura ya existe
+    o si ocurrió un error de conexión/consulta al verificar duplicidad en Firestore.
     
     Args:
         state (AgentState): Estado actual del agente, incluyendo la bandera de duplicidad y la información del registro existente.
         
     Returns:
-        Dict[str, Any]: Estado final actualizado indicando que la factura fue ignorada por duplicidad.
+        Dict[str, Any]: Estado final actualizado indicando que la factura fue ignorada por duplicidad o detenida por error.
     """
+    if state.get("estado_final") == "ERROR":
+        msg = "ERROR: Proceso abortado porque falló la consulta de verificación de duplicidad en Firestore."
+        print(f"\n{BgColor.RED}[Agente - Error Control]{BgColor.OFF} {msg}")
+        return {
+            "estado_final": "ERROR",
+            "mensajes_bitacora": state["mensajes_bitacora"] + [msg]
+        }
+
     info = state.get("info_duplicada") or {}
     msg = f"ADVERTENCIA: Proceso abortado para evitar duplicar stock. Factura folio '{state['datos_factura'].get('numero_factura')}' registrada el {info.get('fecha')}."
     print(f"\n{BgColor.YELLOW}[Agente - Control]{BgColor.OFF} {msg}")
@@ -170,7 +184,11 @@ def node_preparar_siguiente_item(state: AgentState) -> Dict[str, Any]:
     item_actual = pendientes[0]
     restantes = pendientes[1:]
 
-    msg = f"Iniciando evaluación de ítem: '{item_actual.get('nombre_glosa')}' (Formato: {item_actual.get('formato')}, Cantidad: {item_actual.get('cantidad')})"
+    unidades_pack = _parsear_entero_positivo(item_actual.get("unidades")) or 1
+    msg = (
+        f"Iniciando evaluación de ítem: '{item_actual.get('nombre_glosa')}' "
+        f"(Formato: {item_actual.get('formato')}, Cantidad: {item_actual.get('cantidad')}, Unidades/Pack: {unidades_pack})"
+    )
     print(f"\n--- {msg} ---")
 
     return {
@@ -245,11 +263,12 @@ def node_razonar_homologacion(state):
             "requiere_revision": True
         }
     else:
-        decision = razonar_homologacion.invoke({
+        decision_cruda = razonar_homologacion.invoke({
             "glosa_factura": glosa,
             "formato_factura": formato,
             "candidatos": candidatos
         }) or {}
+        decision = validar_respuesta_homologacion(decision_cruda, candidatos=candidatos)
 
     sku = decision.get("sku_seleccionado")
     confianza = float(decision.get("confianza") or 0.0)
@@ -326,6 +345,7 @@ def node_intervencion_humana(state):
     formato = _limpiar_texto(item.get("formato"))
     costo_factura = _parsear_float_positivo(item.get("precio_unitario"))
     cantidad = _parsear_entero_positivo(item.get("cantidad"))
+    unidades_pack = _parsear_entero_positivo(item.get("unidades")) or 1
     campos_ilegibles = _obtener_campos_ilegibles(item)
 
     print("\n" + "="*70)
@@ -334,7 +354,7 @@ def node_intervencion_humana(state):
         f" Glosa Factura: '{glosa or 'ILEGIBLE'}' | "
         f"Formato: {formato or 'No especificado/Ilegible'} | "
         f"Costo Factura: {f'${costo_factura:,.0f}' if costo_factura is not None else 'ILEGIBLE'} | "
-        f"Cantidad: {cantidad if cantidad is not None else 'ILEGIBLE'}"
+        f"Cantidad: {cantidad if cantidad is not None else 'ILEGIBLE'} (Unidades x pack: {unidades_pack})"
     )
     if campos_ilegibles:
         print(f" ⚠️ Campos ilegibles o incompletos detectados: {', '.join(campos_ilegibles)}")
@@ -379,6 +399,7 @@ def node_intervencion_humana(state):
                     break
                 print("      Ingresa un número válido mayor a 0.")
 
+            cantidad_total = cantidad * unidades_pack
             datos_accion = {
                 "tipo_accion": "CREAR_NUEVO",
                 "sku": nuevo_sku,
@@ -389,7 +410,8 @@ def node_intervencion_humana(state):
                 "formato": nuevo_formato,
                 "precio_costo": costo_factura,
                 "precio_venta": precio_venta,
-                "stock_inicial": cantidad
+                "stock_inicial": cantidad_total,
+                "unidades_incluidas": True
             }
         else:
             print(" -> Ítem omitido por decisión del operador.")
@@ -426,12 +448,14 @@ def node_intervencion_humana(state):
             pv_mod = input(" -> ¿Deseas ajustar el precio de venta? [Escribe nuevo precio o Enter para mantener]: ").strip()
             nuevo_pv = _parsear_float_positivo(pv_mod) if pv_mod else None
 
+            cantidad_total = cantidad * unidades_pack
             datos_accion = {
                 "tipo_accion": "ACTUALIZAR_EXISTENTE",
                 "sku": sku,
-                "cantidad": cantidad,
+                "cantidad": cantidad_total,
                 "precio_costo": costo_factura,
-                "nuevo_precio_venta": nuevo_pv
+                "nuevo_precio_venta": nuevo_pv,
+                "unidades_incluidas": True
             }
 
     print("="*70 + "\n")
@@ -444,7 +468,9 @@ def node_intervencion_humana(state):
 
 def node_aplicar_cambios(state):
     """
-    Nodo 8: Aplica las escrituras atómicas en Firestore (actualizar stock o crear nuevo producto).
+    Nodo 8: Aplica las escrituras en Firestore (actualizar stock o crear nuevo producto).
+    Multiplica 'cantidad' por 'unidades' (tamaño del pack) para sumar el total de unidades individuales
+    y verifica 'resultado["exito"]' antes de registrar el estado del ítem.
     
     Args:
         state (AgentState): Estado actual del agente, incluyendo el ítem actual y la intervención humana si aplica.
@@ -456,19 +482,29 @@ def node_aplicar_cambios(state):
     decision = state["decision_actual"] or {}
     accion = state.get("datos_intervencion_humana")
 
+    cantidad_bultos = _parsear_entero_positivo(item.get("cantidad")) or 0
+    unidades_pack = _parsear_entero_positivo(item.get("unidades")) or 1
+    unidades_totales = cantidad_bultos * unidades_pack
+
     registro_item = {
         "glosa_original": _limpiar_texto(item.get("nombre_glosa")) or "ILEGIBLE",
         "formato": _limpiar_texto(item.get("formato")) or None,
-        "cantidad": _parsear_entero_positivo(item.get("cantidad")) or 0,
+        "cantidad": unidades_totales,
+        "unidades_por_pack": unidades_pack,
         "precio_unitario": _parsear_float_positivo(item.get("precio_unitario")) or 0,
         "sku_homologado": None,
         "estado": "PENDIENTE"
     }
+    msg = ""
 
     # Si vino de intervención humana
     if accion:
         tipo = accion.get("tipo_accion")
         if tipo == "CREAR_NUEVO":
+            stock_inicial = accion["stock_inicial"]
+            if not accion.get("unidades_incluidas"):
+                stock_inicial = stock_inicial * unidades_pack
+
             resultado = registrar_nuevo_producto.invoke({
                 "sku": accion["sku"],
                 "nombre": accion["nombre"],
@@ -478,50 +514,84 @@ def node_aplicar_cambios(state):
                 "formato": accion["formato"],
                 "precio_costo": accion["precio_costo"],
                 "precio_venta": accion["precio_venta"],
-                "stock_inicial": accion["stock_inicial"],
-            })
-            registro_item["glosa_original"] = registro_item["glosa_original"] if registro_item["glosa_original"] != "ILEGIBLE" else accion["nombre"]
-            registro_item["cantidad"] = accion["stock_inicial"]
+                "stock_inicial": stock_inicial,
+            }) or {}
+
+            msg = resultado.get("mensaje", "")
+            registro_item["glosa_original"] = (
+                registro_item["glosa_original"]
+                if registro_item["glosa_original"] != "ILEGIBLE"
+                else accion["nombre"]
+            )
+            registro_item["cantidad"] = stock_inicial
             registro_item["precio_unitario"] = accion["precio_costo"]
             registro_item["sku_homologado"] = accion["sku"]
-            registro_item["estado"] = "CREADO_NUEVO"
-            print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {resultado.get('mensaje')}")
+
+            if resultado.get("exito"):
+                registro_item["estado"] = "CREADO_NUEVO"
+                print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {msg}")
+            else:
+                registro_item["estado"] = "ERROR_ESCRITURA"
+                print(f"{BgColor.RED}[Agente - Error Escritura]{BgColor.OFF} {msg}")
 
         elif tipo == "ACTUALIZAR_EXISTENTE":
+            cantidad_actualizar = accion["cantidad"]
+            if not accion.get("unidades_incluidas"):
+                cantidad_actualizar = cantidad_actualizar * unidades_pack
+
             resultado = actualizar_stock_y_costo.invoke({
                 "sku": accion["sku"],
-                "cantidad": accion["cantidad"],
+                "cantidad": cantidad_actualizar,
                 "nuevo_costo": accion["precio_costo"],
                 "nuevo_precio_venta": accion.get("nuevo_precio_venta")
-            })
-            registro_item["cantidad"] = accion["cantidad"]
+            }) or {}
+
+            msg = resultado.get("mensaje", "")
+            registro_item["cantidad"] = cantidad_actualizar
             registro_item["precio_unitario"] = accion["precio_costo"]
             registro_item["sku_homologado"] = accion["sku"]
-            registro_item["estado"] = "ACTUALIZADO"
-            print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {resultado.get('mensaje')}")
+
+            if resultado.get("exito"):
+                registro_item["estado"] = "ACTUALIZADO"
+                print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {msg}")
+            else:
+                registro_item["estado"] = "ERROR_ESCRITURA"
+                print(f"{BgColor.RED}[Agente - Error Escritura]{BgColor.OFF} {msg}")
 
         else:
             registro_item["estado"] = "OMITIDO_POR_HUMANO"
-            print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} Ítem marcado como omitido.")
+            msg = "Ítem marcado como omitido."
+            print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {msg}")
 
     # Si fue homologado automáticamente sin intervención
     else:
         sku = decision.get("sku_seleccionado")
-        cantidad = _parsear_entero_positivo(item.get("cantidad")) or 1
+        cantidad_base = _parsear_entero_positivo(item.get("cantidad")) or 1
+        cantidad_total = cantidad_base * unidades_pack
         costo = _parsear_float_positivo(item.get("precio_unitario")) or 0.0
 
         resultado = actualizar_stock_y_costo.invoke({
             "sku": sku,
-            "cantidad": cantidad,
+            "cantidad": cantidad_total,
             "nuevo_costo": costo
-        })
+        }) or {}
+
+        msg = resultado.get("mensaje", "")
+        registro_item["cantidad"] = cantidad_total
         registro_item["sku_homologado"] = sku
-        registro_item["estado"] = "AUTO_HOMOLOGADO"
-        print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {resultado.get('mensaje')}")
+
+        if resultado.get("exito"):
+            registro_item["estado"] = "AUTO_HOMOLOGADO"
+            print(f"{BgColor.YELLOW}[Agente - Escritura]{BgColor.OFF} {msg}")
+        else:
+            registro_item["estado"] = "ERROR_ESCRITURA"
+            print(f"{BgColor.RED}[Agente - Error Escritura]{BgColor.OFF} {msg}")
 
     items_actualizados = list(state.get("items_procesados", [])) + [registro_item]
+    bitacora = list(state.get("mensajes_bitacora", [])) + ([msg] if msg else [])
     return {
-        "items_procesados": items_actualizados
+        "items_procesados": items_actualizados,
+        "mensajes_bitacora": bitacora
     }
 
 
@@ -541,6 +611,9 @@ def node_registrar_auditoria(state):
     proveedor = _limpiar_texto(datos.get("proveedor")) or "DESCONOCIDO"
     items_procesados = state.get("items_procesados", [])
 
+    hubo_errores = any(i.get("estado") == "ERROR_ESCRITURA" for i in items_procesados)
+    estado_auditoria = "COMPLETADO_CON_ERRORES" if hubo_errores else "COMPLETADO"
+
     print(f"\n{BgColor.YELLOW}[Agente - Auditoría]{BgColor.OFF} Guardando registro transaccional para folio '{folio}'...")
 
     resultado = registrar_auditoria_factura.invoke({
@@ -548,16 +621,16 @@ def node_registrar_auditoria(state):
         "proveedor": proveedor,
         "total_items": len(items_procesados),
         "items_procesados": items_procesados,
-        "estado": "COMPLETADO"
+        "estado": estado_auditoria
     })
 
     id_auditoria = resultado.get("id_auditoria")
-    msg = f"Factura folio '{folio}' procesada completamente. Auditoría ID: {id_auditoria}"
+    msg = f"Factura folio '{folio}' procesada ({estado_auditoria}). Auditoría ID: {id_auditoria}"
     print(f" -> {msg}\n")
 
     return {
         "auditoria_id": id_auditoria,
-        "estado_final": "COMPLETADO",
+        "estado_final": estado_auditoria,
         "mensajes_bitacora": state["mensajes_bitacora"] + [msg]
     }
 
@@ -568,8 +641,9 @@ def node_registrar_auditoria(state):
 
 def decidir_ruta_duplicidad(state):
     """
-    Borde condicional 1: Si la factura ya existe, salta al manejador de duplicados.
-    Si es nueva (o no se pudo verificar duplicidad por falta de folio), arranca la iteración de productos.
+    Borde condicional 1: Si la factura ya existe o hubo un error al consultar Firestore,
+    salta al manejador para detener el proceso.
+    Si es nueva (o el folio era ilegible/ausente), arranca la iteración de productos.
     
     Args:
         state (AgentState): Estado actual del agente, incluyendo la bandera de duplicidad.
@@ -577,7 +651,7 @@ def decidir_ruta_duplicidad(state):
     Returns:
         str: Nombre del nodo siguiente según la condición evaluada.
     """
-    if state.get("es_duplicada"):
+    if state.get("es_duplicada") or state.get("estado_final") == "ERROR":
         return "manejar_duplicada"
     if not state.get("items_pendientes"):
         return "registrar_auditoria"
@@ -703,7 +777,5 @@ def crear_grafo_agente():
     # Configuración de memoria de corto plazo (Checkpointer)
     checkpointer = MemorySaver()
     app = builder.compile(checkpointer=checkpointer)
-
-    return app
 
     return app

@@ -2,6 +2,7 @@
 .env
 env.txt
 *.json
+!src/services/seed_data.json
 
 # Entornos virtuales de Python
 venv/
@@ -15,7 +16,7 @@ __pycache__/
 # Carpetas de datos y documentos locales
 documentos/
 
-# Jupyter Notebooks (descomenta la siguiente línea si quieres ignorar TODOS los notebooks)
+# Jupyter Notebooks
 # *.ipynb
 agente_factura.ipynb
 
