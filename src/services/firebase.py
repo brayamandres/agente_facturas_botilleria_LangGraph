@@ -1,18 +1,16 @@
+import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 from src.config import FIREBASE_CREDENTIALS_PATH, BASE_DIR
-import os
 
 _firestore_client = None
+
 
 def get_firestore_client():
     """
     Retorna la instancia del cliente de Firestore (Singleton).
     Inicializa Firebase Admin SDK si no ha sido inicializado.
-    
-    Args:
-        None
-        
+
     Returns:
         firestore.Client: Instancia del cliente de Firestore.
     """
@@ -47,10 +45,7 @@ def get_firestore_client():
 def get_productos_collection():
     """
     Retorna la referencia a la colección 'productos'.
-    
-    Args:
-        None
-    
+
     Returns:
         firestore.CollectionReference: Referencia a la colección 'productos' en Firestore.
     """
@@ -61,13 +56,34 @@ def get_productos_collection():
 def get_historial_collection():
     """
     Retorna la referencia a la colección 'historial_facturas' para memoria de largo plazo.
-    
-    Args:
-        None
-    
+
     Returns:
         firestore.CollectionReference: Referencia a la colección 'historial_facturas' en Firestore.
     """
     db = get_firestore_client()
     return db.collection("historial_facturas")
+
+
+def get_movimientos_collection():
+    """
+    Retorna la referencia a la colección 'movimientos_inventario' utilizada para registrar
+    atómicamente cada línea aplicada (proveedor + folio + línea) junto con la actualización de stock.
+
+    Returns:
+        firestore.CollectionReference: Referencia a la colección 'movimientos_inventario' en Firestore.
+    """
+    db = get_firestore_client()
+    return db.collection("movimientos_inventario")
+
+
+def get_equivalencias_collection():
+    """
+    Retorna la referencia a la colección 'equivalencias_proveedor' que almacena como memoria
+    de largo plazo las equivalencias aprobadas entre (proveedor, glosa) y SKU del catálogo.
+
+    Returns:
+        firestore.CollectionReference: Referencia a la colección 'equivalencias_proveedor' en Firestore.
+    """
+    db = get_firestore_client()
+    return db.collection("equivalencias_proveedor")
 

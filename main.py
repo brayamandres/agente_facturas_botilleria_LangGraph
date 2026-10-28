@@ -395,15 +395,16 @@ def ver_historial_auditoria():
         if not docs:
             print(" No hay registros de facturas procesadas en el historial.")
         else:
-            print(f"{'ID AUDITORÍA':<22} | {'FOLIO':<12} | {'PROVEEDOR':<22} | {'ITEMS'}")
+            print(f"{'ID AUDITORÍA':<18} | {'FOLIO':<10} | {'PROVEEDOR':<18} | {'ITEMS':<5} | {'ESTADO'}")
             print("-" * 75)
             for doc in docs:
                 d = doc.to_dict()
-                aud_id = doc.id[:20]
-                folio = str(d.get("folio", "N/A"))[:11]
-                prov = str(d.get("proveedor", "N/A"))[:20]
+                aud_id = doc.id[:17]
+                folio = str(d.get("folio", "N/A"))[:9]
+                prov = str(d.get("proveedor", "N/A"))[:17]
                 total = d.get("total_items", 0)
-                print(f"{aud_id:<22} | {folio:<12} | {prov:<22} | {total}")
+                estado_doc = str(d.get("estado", "COMPLETADO"))
+                print(f"{aud_id:<18} | {folio:<10} | {prov:<18} | {total:<5} | {estado_doc}")
 
         print("=" * 75 + "\n")
     except Exception as e:
