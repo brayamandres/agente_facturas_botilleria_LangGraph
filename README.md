@@ -29,7 +29,7 @@ flowchart TD
     subgraph AgentFramework ["Orquestador Agéntico (LangGraph)"]
         State["Estado Global (AgentState)\n• ruta_imagen • items_pendientes\n• decision_actual • alerta_precio"]
         GraphCore["Grafo de Estados Finito (StateGraph)"]
-        Checkpointer["Memoria de Corto Plazo\n(MemorySaver / thread_id)"]
+        Checkpointer["Checkpointer Persistente SQLite\n(data/checkpoints.sqlite / thread_id)"]
         GraphCore <--> State
         GraphCore <--> Checkpointer
     end
@@ -129,11 +129,13 @@ El agente dispone de **9 herramientas formales** construidas bajo el estándar `
 
 ---
 
-## 5. Estrategia de Memoria Dual
+## 5. Estrategia de Memoria Dual y Continuidad Persistente (IE3 e IE4)
 
-* **Memoria de Corto Plazo (Working Memory / Sesión):**
-  * Implementada mediante `MemorySaver` de LangGraph (`langgraph.checkpoint.memory`).
-  * Cada ejecución se indexa bajo un `thread_id` único, manteniendo trazabilidad del estado (`AgentState`) a lo largo de todos los nodos del ciclo.
+* **Memoria de Trabajo Persistente (Checkpointer SQLite y Sesiones):**
+  * Implementada en `src/services/checkpointer.py` respaldada en **`data/checkpoints.sqlite`** (`SqliteSaver`).
+  * Cada ejecución se indexa bajo un `thread_id` registrado en SQLite (`sesiones_facturas`) y utiliza pausa/reanudación nativa de LangGraph mediante `interrupt()` y `Command(resume=...)`.
+  * Permite pausar una factura a mitad de camino, **cerrar completamente el programa**, volver a abrirlo y continuar desde la **Opción 2 ("Reanudar factura pendiente")** sin repetir la extracción OCR ni duplicar actualizaciones ya aplicadas.
+  * 📄 **Documentación detallada y protocolo de prueba:** Ver [`CONTINUIDAD_Y_MEMORIA.md`](./CONTINUIDAD_Y_MEMORIA.md).
 * **Memoria de Largo Plazo (Persistencia en Firestore):**
   * **Semántica:** Colección `productos`, indexada con embeddings de 384 dimensiones generados por `SentenceTransformers` (`paraphrase-multilingual-MiniLM-L12-v2`).
   * **Transaccional / Episódica:** Colección `historial_facturas`, que registra cada factura procesada, fecha, proveedor, detalle de ítems y estado (`COMPLETADO` o `COMPLETADO_CON_ERRORES`).
@@ -192,13 +194,14 @@ Para iniciar el sistema desde la interfaz de línea de comandos (CLI):
 python main.py
 ```
 
-El menú interactivo dispone de **6 opciones**:
-1. **Procesar una factura (Ejecutar Agente LangGraph):** Permite elegir cualquier factura disponible en `/data` y ejecutar el flujo completo del agente.
-2. **Probar control de duplicados:** Re-procesa automáticamente la última factura procesada en la sesión (o permite seleccionar una si aún no se ha ejecutado la Opción 1) para demostrar el bloqueo adaptativo ante duplicados.
-3. **Visualizar inventario en Firestore:** Lista los productos actuales del catálogo con su SKU, stock, costo y precio de venta.
-4. **Consultar historial de auditoría:** Muestra las facturas registradas en la colección `historial_facturas`.
-5. **Sembrar / Indexar catálogo inicial con Embeddings en Firestore:** Carga los 40 productos base desde `src/services/seed_data.json` calculando sus embeddings de 384 dimensiones.
-6. **Salir:** Finaliza la aplicación.
+El menú interactivo dispone de **7 opciones**:
+1. **Procesar una factura nueva (Ejecutar Agente LangGraph):** Permite elegir cualquier factura disponible en `/data` y ejecutar el flujo completo (pudiendo pausar en cualquier *Human-in-the-Loop* con `p`).
+2. **Reanudar factura pendiente:** Recupera desde SQLite las sesiones pausadas, muestra los ítems ya aplicados, la bitácora previa y los ítems pendientes, y retoma la ejecución con `Command(resume=...)`.
+3. **Probar control de duplicados:** Re-procesa automáticamente la última factura procesada en la sesión (o permite seleccionar una) para demostrar el bloqueo adaptativo ante duplicados.
+4. **Visualizar inventario en Firestore:** Lista los productos actuales del catálogo con su SKU, stock, costo y precio de venta.
+5. **Consultar historial de auditoría:** Muestra las facturas registradas en la colección `historial_facturas`.
+6. **Sembrar / Indexar catálogo inicial con Embeddings en Firestore:** Carga los 40 productos base desde `src/services/seed_data.json` calculando sus embeddings de 384 dimensiones.
+7. **Salir:** Finaliza la aplicación.
 
 ---
 
@@ -206,18 +209,20 @@ El menú interactivo dispone de **6 opciones**:
 
 ```text
 agente_facturas_botilleria_LangGraph/
-├── data/                           # Facturas en imagen (PNG / JPG)
+├── data/                           # Facturas en imagen y persistencia SQLite local
 │   ├── factura1.png                # Factura de prueba incluida en el repositorio
+│   ├── checkpoints.sqlite          # Checkpoints LangGraph y sesiones (generado al ejecutar)
 │   └── optimizado/                 # Imágenes redimensionadas automáticamente por PIL
 ├── src/
 │   ├── __init__.py
-│   ├── config.py                   # Variables de entorno, modelos IA y LangSmith
+│   ├── config.py                   # Variables de entorno, rutas SQLite, modelos IA y LangSmith
 │   ├── agent/                      # Orquestador LangGraph
 │   │   ├── __init__.py
 │   │   ├── state.py                # Definición del Estado Tipado (AgentState)
-│   │   └── graph.py                # Nodos, validaciones, bordes condicionales y MemorySaver
-│   ├── services/                   # Clientes y conexiones externas
+│   │   └── graph.py                # Nodos, interrupt() HITL, bordes condicionales y grafo SQLite
+│   ├── services/                   # Clientes, persistencia y conexiones externas
 │   │   ├── __init__.py
+│   │   ├── checkpointer.py         # Checkpointer persistente SQLite y catálogo de sesiones
 │   │   ├── firebase.py             # Cliente Firestore Singleton y colecciones
 │   │   ├── gemini.py               # Cliente Gemini Vision y preprocesamiento PIL
 │   │   ├── llm.py                  # LLM para razonamiento (Groq / OpenAI)
@@ -229,7 +234,8 @@ agente_facturas_botilleria_LangGraph/
 │       ├── query_tools.py          # Consulta (visión, duplicidad, búsqueda vectorial, SKU)
 │       ├── reasoning_tools.py      # Razonamiento (homologación validada, variación de costo)
 │       └── write_tools.py          # Escritura transaccional (stock atómico, alta SKU, auditoría)
-├── main.py                         # Punto de entrada interactivo CLI (6 opciones)
+├── main.py                         # Punto de entrada interactivo CLI (7 opciones + Command resume)
 ├── requirements.txt                # Dependencias del proyecto
-└── README.md                       # Documentación técnica del sistema
+├── CONTINUIDAD_Y_MEMORIA.md        # Documentación técnica y guía de continuidad SQLite / HITL
+└── README.md                       # Documentación general del sistema
 ```

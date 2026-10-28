@@ -13,6 +13,13 @@ env/
 __pycache__/
 *.pyc
 
+# Persistencia local de checkpoints y sesiones SQLite (LangGraph)
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
 # Carpetas de datos y documentos locales
 documentos/
 
@@ -32,3 +39,5 @@ optimizado/
 !factura1.png
 *.png
 *.jpg
+
+CONTINUIDAD_Y_MEMORIA.md

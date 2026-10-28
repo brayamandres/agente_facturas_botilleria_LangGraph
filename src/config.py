@@ -10,6 +10,7 @@ load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
 DATA_DIR = BASE_DIR / "data"
 DATA_OPTIMIZADO_DIR = DATA_DIR / "optimizado"
 DATA_OPTIMIZADO_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINT_DB_PATH = DATA_DIR / "checkpoints.sqlite"
 
 # Claves de APIs
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
