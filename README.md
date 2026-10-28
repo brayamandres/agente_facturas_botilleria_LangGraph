@@ -1,330 +1,246 @@
-# Agente Inteligente de Homologación de Facturas e Inventario (Botillería)
+# Agente de facturas para botillería
 
-## 1. Problema de Negocio y Solución
+Este proyecto ayuda a ingresar compras al inventario de una botillería a partir de imágenes de facturas. Busca resolver un problema habitual: los proveedores describen el mismo producto con nombres, abreviaturas y formatos distintos de los que usa el catálogo del negocio.
 
-En el rubro de las botillerías y comercializadoras de licores, las facturas emitidas por distribuidores mayoristas emplean glosas con abreviaturas comerciales informales (ej. `"mst 35 750"`, `"cerv cor 355 pack6"`, `"pis cap 30"`), empaques por bulto/pack, calibres variados y estructuras heterogéneas. La digitación manual de estas facturas genera altos costos operativos, lentitud en la reposición y errores en el stock y costos.
+El agente lee la factura con Gemini, busca productos relacionados en Firestore y utiliza un modelo de lenguaje para proponer una equivalencia. Cuando la información es suficiente, actualiza el stock y el costo. Si encuentra una descripción dudosa, datos incompletos o un aumento de costo relevante, pide la intervención del operador.
 
-**Nuestra Solución** es desarrollar un **Agente Funcional con LangGraph** que orquesta herramientas de percepción multimodal, búsqueda semántica vectorial, razonamiento estructurado con LLM y persistencia en Firestore, con soporte para **memoria de corto y largo plazo** y un ciclo de **revisión humana supervisada (*Human-in-the-Loop*)** ante anomalías de precios, datos ilegibles o productos nuevos.
+La aplicación se maneja desde un menú en consola. Permite procesar facturas, revisar inventario e historial, y pausar una revisión para retomarla después.
 
-## 2. Arquitectura General del Sistema
+## Cómo funciona
 
-El siguiente diagrama detalla la orquestación entre la interfaz de usuario, el orquestador LangGraph, los modelos de inteligencia artificial y la capa de almacenamiento en la nube:
+1. **Lee la imagen.** Extrae el proveedor, el folio y las líneas de productos. La respuesta se valida con esquemas Pydantic.
+2. **Consulta el historial.** Si la factura ya está completada, detiene el procesamiento. Si tiene un registro previo con errores, recupera sus resultados para retomar las líneas pendientes de aplicación.
+3. **Busca una equivalencia.** Primero consulta las asociaciones aprobadas para ese proveedor y esa glosa. Si no encuentra una, genera un embedding y recupera los tres candidatos más cercanos del catálogo.
+4. **Evalúa la coincidencia.** Una equivalencia aprendida se reutiliza directamente. En los demás casos, el LLM compara la glosa y el formato con los candidatos disponibles.
+5. **Revisa cantidades y costos.** Distingue precios por pack y por unidad, y compara el costo normalizado con el del catálogo.
+6. **Aplica o solicita revisión.** Los casos claros se registran automáticamente. Los casos dudosos quedan a disposición del operador.
+7. **Guarda el resultado.** Registra los movimientos de inventario y el estado de la factura en Firestore.
 
-```mermaid
-flowchart TD
-    subgraph UI ["Capa de Interfaz y Entrada"]
-        Usuario([Operador de Botillería])
-        CLI["CLI Interactiva (main.py)"]
-        FacturaImg[/"Factura en Imagen (data/factura1.png)"/]
-        Usuario -->|Ejecuta / Selecciona| CLI
-        CLI -->|Carga| FacturaImg
-    end
+Por ejemplo, una compra de **2 packs de 6 botellas a \$12.000 por pack** debe sumar **12 botellas** al stock y registrar **$2.000 de costo por botella**.
 
-    subgraph AgentFramework ["Orquestador Agéntico (LangGraph)"]
-        State["Estado Global (AgentState)\n• ruta_imagen • items_pendientes\n• decision_actual • alerta_precio"]
-        GraphCore["Grafo de Estados Finito (StateGraph)"]
-        Checkpointer["Checkpointer Persistente SQLite\n(data/checkpoints.sqlite / thread_id)"]
-        GraphCore <--> State
-        GraphCore <--> Checkpointer
-    end
-
-    subgraph PerceptionModule ["Módulo de Percepción Multimodal"]
-        GeminiClient["Google Gemini Vision API\n(gemini-3.5-flash / gemini-3.8-flash / gemini-2.5-pro)"]
-        Thumbnails["Preprocesamiento PIL (1280x720)"]
-    end
-
-    subgraph RetrievalModule ["Módulo de Búsqueda Vectorial"]
-        Embeddings["SentenceTransformers\n(paraphrase-multilingual-MiniLM-L12-v2 / 384d)"]
-    end
-
-    subgraph ReasoningModule ["Módulo de Razonamiento LLM"]
-        LLM["Modelo LLM\n(Groq openai/gpt-oss-120b / OpenAI gpt-4o-mini)"]
-    end
-
-    subgraph DatabaseLayer ["Capa de Persistencia y Memoria a Largo Plazo (Firebase Firestore)"]
-        VectorDB[("Colección 'productos'\n• Catálogo interno\n• Índices Vectoriales (COSINE)")]
-        EquivDB[("Colección 'equivalencias_proveedor'\n• Memoria Aprendida\n• Proveedor + Glosa -> SKU")]
-        AuditDB[("Colección 'historial_facturas'\n• Memoria Transaccional\n• Auditoría de Folios")]
-    end
-
-    CLI -->|Inicia Grafo| GraphCore
-    FacturaImg --> Thumbnails --> GeminiClient
-    GeminiClient -->|JSON Estructurado| GraphCore
-    GraphCore <-->|Consulta / Guarda Equivalencia| EquivDB
-    GraphCore -->|Vectorizar Glosa| Embeddings
-    Embeddings -->|Vector Query 384d| VectorDB
-    VectorDB -->|Top 3 Candidatos + Similitud| GraphCore
-    GraphCore -->|Glosa + Candidatos| LLM
-    LLM -->|SKU Validado + Confianza + Alerta| GraphCore
-    GraphCore -->|Incremento Atómico Stock y Costos| VectorDB
-    GraphCore -->|Guardar Comprobante Histórico| AuditDB
-    GraphCore -.->|Human-in-the-Loop| Usuario
-```
-
-
-## 3. Planificación Explícita y Política de Decisión Adaptativa
-
-El grafo de estados finitos del agente modela una planificación base estructurada: **extraer, verificar, recuperar, razonar, evaluar y escribir**, en donde el agente formaliza y explicita esta toma de decisiones mediante una **Política de Prioridades Operativas** (`src/agent/planning_policy.py`).
-
-Para visibilizar en consola cada decisión adaptativa en tiempo real y eliminar bloques de texto plano no diferenciado, el agente emplea la librería **`colorist`**, destacando el prefijo **`[Planificación]`** con fondo Cyan (`BgColor.CYAN`) y el texto de la prioridad en color Cyan (`Color.CYAN`), registrando además la regla en `state["politica_planificacion"]` y en la bitácora transaccional.
-
-### 3.1. Tabla Formal de la Política de Planificación
-
-| Prioridad | Regla | Condición Operativa | Acción del Agente |
-| :---: | :--- | :--- | :--- |
-| **1** | **Control de Duplicidad e Integridad de Proceso** | Falla la verificación de duplicidad (factura ya completada o error al consultar Firestore). | **Detener las escrituras** y abortar el flujo para proteger el inventario. |
-| **2** | **Integridad de Datos** | Faltan datos necesarios (glosa vacía, cantidad no entera como `1.6` o precio unitario ilegible). | **Solicitar corrección** al operador humano (*Human-in-the-Loop*) sin asumir valores arbitrarios. |
-| **3** | **Ejecución Segura** | Hay equivalencia segura (memoria aprendida o confianza heurística $\ge 0.75$) y datos válidos. | **Aplicar el movimiento** atómico (actualizar stock y movimiento) sin fricción. |
-| **4** | **Gestión de Incertidumbre y Variación de Costo** | Hay ambigüedad (confianza heurística $< 0.75$, pack ambiguo) o aumento de costo ($>15\%$). | **Solicitar revisión** y decisión humana con candidatos recuperados antes de escribir. |
-| **5** | **Resiliencia e Idempotencia ante Fallos** | Falló un movimiento transaccional durante el procesamiento de la factura. | **Guardarlo como pendiente** y reintentar de forma selectiva sin repetir las líneas exitosas. |
-
-
-### 3.2. Diagrama de Estados y Flujo de Decisión Adaptativa (LangGraph)
-
-El siguiente diagrama detalla cómo las 5 prioridades de planificación gobiernan la máquina de estados cíclica:
+## Arquitectura
 
 ```mermaid
 flowchart TD
-    START([Inicio: Factura Recibida]) --> NodeExtraer["1. node_extraer\n(Gemini Vision OCR + Validación Esquema)"]
-    NodeExtraer --> NodeVerifDup["2. node_verificar_duplicidad\n(Consulta Firestore Audit / Historial)"]
-
-    %% Borde Condicional 1
-    NodeVerifDup --> CondDuplicada{"¿Estado de Duplicidad?"}
-    CondDuplicada -->|Prioridad 1: Factura ya completada o Error BD| NodeManejarDup["node_manejar_duplicada\n[Planificación] Prioridad 1: Detener escrituras"]
-    NodeManejarDup --> END([Fin del Proceso: Abortado])
-
-    CondDuplicada -->|Prioridad 5: Factura previa con errores| NodePrepItemP5["3. node_preparar_siguiente_item\n[Planificación] Prioridad 5: Retomar solo fallidas"]
-    CondDuplicada -->|Factura nueva o folio ilegible| NodePrepItem["3. node_preparar_siguiente_item\n(Toma ítem y unidades por pack)"]
-    NodePrepItemP5 --> NodeRecupCand
-    NodePrepItem --> NodeRecupCand["4. node_recuperar_candidatos\n(Memoria Equivalencias + Vector Search)"]
-
-    %% Ciclo de Procesamiento por Ítem
-    NodeRecupCand --> NodeRazonar["5. node_razonar_homologacion\n(Equivalencia Aprendida o LLM Match)"]
-    NodeRazonar --> NodeEvalCosto["6. node_evaluar_costo\n(Normalización de Pack y Check alza > 15%)"]
-
-    %% Borde Condicional 2 (Evaluación de Política)
-    NodeEvalCosto --> CondPlanificacion{"Evaluación de Política de Planificación"}
-    
-    CondPlanificacion -->|Prioridad 2: Glosa vacía, cant no entera ej. 1.6 o precio ilegible| NodeHITL2["7. node_intervencion_humana\n[Planificación] Prioridad 2: Solicitar corrección"]
-    CondPlanificacion -->|Prioridad 4: Confianza < 0.75, pack ambiguo o alza > 15%| NodeHITL4["7. node_intervencion_humana\n[Planificación] Prioridad 4: Solicitar revisión"]
-    CondPlanificacion -->|Prioridad 3: Equivalencia segura y datos íntegros| NodeAplicar["8. node_aplicar_cambios\n[Planificación] Prioridad 3: Aplicar movimiento atómico"]
-    
-    NodeHITL2 --> NodeAplicar
-    NodeHITL4 --> NodeAplicar
-
-    %% Fallo en escritura (Prioridad 5)
-    NodeAplicar --> CondEscritura{"¿Resultado Escritura?"}
-    CondEscritura -->|Prioridad 5: Error transaccional| NodePendiente["Marcar línea como pendiente\n[Planificación] Prioridad 5: Guardar pendiente"]
-    CondEscritura -->|Escritura exitosa| NodeAuditItem["Actualizar ítem procesado"]
-    NodePendiente --> CondMasItems
-    NodeAuditItem --> CondMasItems
-
-    %% Borde Condicional 3 (Loop)
-    CondMasItems{"¿Quedan ítems pendientes?"}
-    CondMasItems -->|Sí: Siguiente Ítem| NodePrepItem
-    CondMasItems -->|No: Todos procesados| NodeAuditoria["9. node_registrar_auditoria\n(Guardar historial: COMPLETADO, PARCIAL o ERROR)"]
-
-    NodeAuditoria --> END2([Fin del Proceso: Factura Finalizada])
+    Operador[Operador] --> CLI[Menú en consola: main.py]
+    CLI --> Grafo[LangGraph: estado y coordinación del flujo]
+    Imagen[Imagen de factura] --> Vision[Gemini: extracción estructurada]
+    Grafo --> Vision
+    Vision --> Grafo
+    Grafo <--> SQLite[(SQLite: checkpoints y sesiones)]
+    Grafo <--> Equivalencias[(Firestore: equivalencias aprobadas)]
+    Grafo --> Embeddings[SentenceTransformers: vector de 384 dimensiones]
+    Embeddings --> Catalogo[(Firestore: catálogo y búsqueda vectorial)]
+    Catalogo --> Grafo
+    Grafo --> LLM[LLM: comparación de productos]
+    LLM --> Grafo
+    Grafo --> Revision[Revisión humana cuando es necesaria]
+    Revision --> Grafo
+    Grafo --> Escritura[Herramientas de escritura]
+    Escritura --> Catalogo
+    Escritura --> Movimientos[(Firestore: movimientos de inventario)]
+    Escritura --> Historial[(Firestore: historial de facturas)]
 ```
 
+LangGraph organiza los pasos y las rutas condicionales. LangChain aporta las herramientas declaradas con `@tool`, los prompts y la conexión con el modelo de razonamiento. La secuencia está definida en el código, el LLM interviene en la homologación de productos dentro de ese flujo.
 
-### 3.3. Ejemplos Concretos de Ejecución por Prioridad (Salidas en Consola)
+Por su parte, Gemini se encarga de interpretar la imagen. SentenceTransformers genera los vectores para comparar descripciones. Firestore mantiene el catálogo, las equivalencias y los registros del negocio, mientras que SQLite conserva el avance de cada sesión en el equipo local.
 
-A continuación se muestran ejemplos reales del formato visual emitido por el agente mediante `colorist`:
+### Herramientas disponibles
 
-#### Ejemplo Prioridad 1 (Control de Duplicidad e Integridad):
-```text
-[Agente - Verificación] Comprobando duplicidad para folio '7700' de 'DISTRIBUIDORA CENTRAL'...
- -> La factura folio '7700' de 'DISTRIBUIDORA CENTRAL' ya fue registrada y completada previamente.
-[Planificación] Prioridad 1 (Control de Duplicidad e Integridad) -> Factura folio '7700' de 'DISTRIBUIDORA CENTRAL' ya completada previamente. Deteniendo escrituras.
-[Agente - Control] ADVERTENCIA: Proceso abortado para evitar duplicar stock. Factura folio '7700' registrada el 2026-10-28.
+| Grupo | Herramientas | Uso |
+| --- | --- | --- |
+| Consulta | `extraer_factura_desde_imagen`, `consultar_duplicidad_factura` | Leer la factura y revisar su historial. |
+| Consulta | `buscar_candidatos_vectoriales`, `consultar_producto_por_sku`, `consultar_equivalencia_proveedor` | Recuperar productos y asociaciones conocidas. |
+| Razonamiento | `razonar_homologacion`, `evaluar_variacion_costo` | Comparar candidatos y detectar aumentos de costo. |
+| Escritura | `actualizar_stock_y_costo`, `registrar_nuevo_producto` | Aplicar compras a productos existentes o registrar productos nuevos. |
+| Escritura | `registrar_auditoria_factura`, `guardar_equivalencia_proveedor` | Conservar resultados y equivalencias aprobadas. |
+
+### Decisiones durante el procesamiento
+
+La política de decisión está en `src/agent/planning_policy.py`.
+
+| Situación | Respuesta del agente |
+| --- | --- |
+| Factura ya completada o error al consultar duplicidad | Detiene las escrituras. |
+| Glosa, cantidad o precio incompletos o inválidos | Solicita corrección al operador. |
+| Producto identificado, datos válidos y sin alertas | Aplica el movimiento automáticamente. |
+| Confianza menor a 0,75, solicitud de revisión, pack ambiguo o aumento de costo superior al 15 % | Solicita revisión humana. |
+| Fallo al registrar un movimiento | Registra el error para permitir un reintento selectivo. |
+
+Cuando se utiliza el LLM, el puntaje de confianza combina su estimación con la similitud vectorial: 70 % y 30 %, respectivamente, cuando la similitud está disponible en el rango admitido. Es una regla práctica para decidir cuándo revisar; no equivale a una probabilidad de acierto medida. Además, el SKU propuesto debe pertenecer a los candidatos recuperados.
+
+```mermaid
+flowchart TD
+    Inicio([Factura seleccionada]) --> Extraer[Extraer datos]
+    Extraer --> Verificar[Verificar duplicidad]
+    Verificar --> Control{Resultado de la verificación}
+    Control -->|Duplicada o error de consulta| Detener([Detener])
+    Control -->|Error de extracción o sin ítems| Auditar[Registrar auditoría]
+    Control -->|Nueva o reintentable con ítems| Preparar[Preparar siguiente ítem]
+    Preparar --> Recuperar[Consultar equivalencia o buscar candidatos]
+    Recuperar --> Razonar[Resolver homologación]
+    Razonar --> Costo[Normalizar costo y evaluar variación]
+    Costo --> Decision{¿Datos válidos y coincidencia segura sin alertas?}
+    Decision -->|Sí| Aplicar[Aplicar decisión y registrar resultado]
+    Decision -->|No| Humano[Interrupción para revisión humana]
+    Humano -->|Confirmar, corregir, crear u omitir| Aplicar
+    Humano -->|Pausar| Pausa[(Guardar sesión en SQLite)]
+    Pausa -->|Reanudar la misma sesión| Humano
+    Aplicar --> Mas{¿Quedan ítems?}
+    Mas -->|Sí| Preparar
+    Mas -->|No| Auditar
+    Auditar --> Fin([Fin])
 ```
 
-#### Ejemplo Prioridad 2 (Integridad de Datos — Cantidad no entera):
-```text
---- Iniciando evaluación de ítem [L1]: 'Pisco Mistral 35' (Cantidad: 1.6, Unidades/Pack: 1 u/pack) ---
-[Planificación] Prioridad 2 (Integridad de Datos) -> Faltan datos requeridos en el ítem: cantidad (no es entero: 1.6). Solicitando corrección al operador.
-[HUMAN-IN-THE-LOOP - PAUSA LANGGRAPH] Se requiere decisión del operador:
- [AVISO] Campos ilegibles o incompletos detectados: cantidad (no es entero: 1.6)
+## Memoria y continuidad
+
+**Durante una factura**, `AgentState` conserva los datos extraídos, el ítem actual, los candidatos, las decisiones y los resultados acumulados. Los checkpoints se guardan en `data/checkpoints.sqlite`, asociados a un `thread_id`. El mismo archivo contiene el registro de sesiones usado por el menú de reanudación.
+
+La revisión humana usa `interrupt()` de LangGraph. Si el operador pausa la tarea, puede cerrar la aplicación y volver a abrirla. Al elegir la sesión pendiente, el programa recupera el estado y continúa con `Command(resume=...)`. Para conservar esa continuidad se necesita mantener el archivo SQLite local.
+
+**Entre facturas**, Firestore conserva cuatro colecciones:
+
+| Colección | Información que conserva |
+| --- | --- |
+| `productos` | Catálogo, stock, costos, precios de venta y embeddings. |
+| `equivalencias_proveedor` | Relación aprobada entre proveedor, glosa y SKU. |
+| `movimientos_inventario` | Identidad y resultado de los movimientos aplicados por línea. |
+| `historial_facturas` | Resultado de cada factura y detalle de sus líneas procesadas. |
+
+Con el cliente real de Firestore, las herramientas de stock y alta de productos registran el producto y su movimiento dentro de una transacción. La identidad de operación utiliza proveedor, folio y número de línea para reconocer movimientos ya aplicados. Si el folio no es legible, se usa un respaldo basado en el nombre del archivo; en ese caso, la detección de duplicados tiene limitaciones.
+
+Las equivalencias aprobadas por el operador se guardan para futuras compras del mismo proveedor. Así, una glosa ya conocida puede resolverse sin volver a consultar al LLM, aunque sigue pasando por la revisión de datos y costos.
+
+## Instalación
+
+Se necesita Python 3.10 o superior, acceso a internet y un proyecto de Firebase con Firestore habilitado. La revisión local se realizó con Python 3.12.
+
+Desde la raíz del repositorio, en PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item .env.example .env
 ```
 
-#### Ejemplo Prioridad 3 (Ejecución Segura — Auto-homologación):
-```text
---- Iniciando evaluación de ítem [L1]: 'CERV CORONA 355 PACK6' (Cantidad: 2, Unidades/Pack: 6 u/pack) ---
-[Agente - Retrieval Semántico] Buscando candidatos para 'CERV CORONA 355 PACK6'...
- -> Candidatos recuperados: CER-COR-355 (Cerveza Corona 355cc)
-[Agente - Razonamiento LLM] Evaluando homologación...
- -> Decisión de homologación: SKU=CER-COR-355 (Confianza=0.95) | Motivo: Match exacto
-[Planificación] Prioridad 3 (Ejecución Segura) -> Equivalencia segura validada para 'CERV CORONA 355 PACK6' -> SKU 'CER-COR-355' (Confianza: 0.95) y datos íntegros. Aplicando movimiento atómico.
-[Agente - Escritura] Stock de 'CER-COR-355' actualizado atómicamente de 20 a 32 unidades.
+Edita `.env` con tus credenciales:
+
+```dotenv
+#Credenciales Firebase
+FIREBASE_CREDENTIALS_PATH=path_al_json
+
+#Credenciales Google
+GOOGLE_API_KEY=google_api_key
+
+#Credenciales de Groq
+GROQ_API_KEY=groq_api_key
+
+#Credenciales OpenAI
+#OPENAI_API_KEY=openai_api_key
+
+#Credenciales LangSmith
+LANGSMITH_API_KEY=langsmith_api_key
 ```
 
-#### Ejemplo Prioridad 4 (Gestión de Incertidumbre o Alza de Costo):
-```text
---- Iniciando evaluación de ítem [L1]: 'MST NOBLE 35 BOT 750' (Cantidad: 2, Unidades/Pack: 6 u/pack) ---
-[Agente - Retrieval Semántico] Buscando candidatos para 'MST NOBLE 35 BOT 750'...
- -> Candidatos recuperados: PIS-CAP-35 (Pisco Capel 35°), PIS-MIS-35-750 (Pisco Mistral Añejado 35°)
-[Agente - Razonamiento LLM] Evaluando homologación...
- -> Decisión de homologación: SKU=None (Confianza=0.00) | Motivo: Glosa abreviada requiere confirmación humana.
-[Planificación] Prioridad 4 (Gestión de Incertidumbre y Costos) -> Ambigüedad en precio/unidades de pack; No se encontró coincidencia en catálogo. Solicitando revisión humana.
+`FIREBASE_CREDENTIALS_PATH` debe apuntar al JSON de una cuenta de servicio con permisos sobre Firestore. Puede ser una ruta absoluta o relativa a la raíz del proyecto. Las credenciales y `.env` están excluidos por `.gitignore`.
+
+Para el razonamiento basta con configurar **Groq u OpenAI**. Si ambas claves están presentes, el código elige Groq, esto es seleccionado en el código, por lo que si se quiere ocupar OpenAI, hay que realizar cambios.
+
+Los nombres de los modelos están en `src/config.py` y `src/services/llm.py`. Gemini intenta los modelos de su lista en orden hasta conseguir una extracción válida, esto se debe a que se realiza mediante un free tier. Sin embargo si se tiene la api pagada no debería intentar uno por uno con los distintos modelos.
+### Preparar el catálogo
+
+1. Inicia la aplicación y utiliza la opción **6** para cargar el catálogo de `src/services/seed_data.json`, que contiene 40 productos. La primera generación de embeddings puede necesitar descargar el modelo de SentenceTransformers.
+2. Crea en Firestore el índice vectorial de la colección `productos`, sobre el campo `embedding`, con **384 dimensiones**. Las consultas del proyecto usan distancia **COSINE**. La siembra guarda los vectores, pero no crea el índice.
+3. Confirma que el catálogo se puede consultar con la opción **4** antes de procesar una factura.
+
+La configuración del índice se explica en la [documentación de búsqueda vectorial de Firestore](https://firebase.google.com/docs/firestore/vector-search). Si la consulta devuelve un error de índice faltante, sigue las indicaciones del servicio y espera a que el índice esté disponible.
+
+La siembra también puede ejecutarse desde la raíz con:
+
+```powershell
+.\.venv\Scripts\python.exe -m src.services.seed
 ```
 
-#### Ejemplo Prioridad 5 (Resiliencia e Idempotencia ante Fallos):
-```text
-[Planificación] Prioridad 5 (Resiliencia e Idempotencia) -> Falló auto-escritura de stock [L2] (Fallo transitorio simulado en Firestore). Guardado como pendiente (ERROR_ESCRITURA) para reintento selectivo.
-...
-[Agente - Verificación] Comprobando duplicidad para folio '7700' de 'DISTRIBUIDORA CENTRAL'...
- -> La factura folio '7700' tiene un registro previo en estado 'COMPLETADO_CON_ERRORES' (ID: AUD-0001). Se retomarán solo las líneas fallidas.
- -> Reintento parcial selectivo: se omiten 2 línea(s) exitosa(s) y se procesarán 1 línea(s) fallida(s)/pendiente(s).
-[Planificación] Prioridad 5 (Resiliencia e Idempotencia) -> Factura previa en estado 'REINTENTO_CON_ERRORES'. Retomando únicamente 1 línea(s) fallida(s), conservando 2 línea(s) exitosa(s) sin repetir escrituras.
+Los productos que ya tienen embedding se omiten por defecto. Cuando la siembra escribe un producto, también utiliza los valores de stock y precios del catálogo inicial; conviene tenerlo presente si se trabaja con una base que ya contiene movimientos.
+
+## Uso
+
+```powershell
+.\.venv\Scripts\python.exe main.py
 ```
 
+Agrega las imágenes de facturas a `data/`. El selector del menú reconoce archivos `.png`, `.jpg` y `.jpeg`. La entrada del agente es una imagen; el menú no procesa facturas en PDF directamente.
 
-## 4. Catálogo de Herramientas (*Agent Tools*) y Reglas de Validación
+| Opción | Qué permite hacer |
+| --- | --- |
+| 1. Procesar una factura nueva | Seleccionar una imagen y ejecutar el agente. |
+| 2. Reanudar factura pendiente | Recuperar una sesión guardada y continuar la revisión. |
+| 3. Probar control de duplicados | Volver a procesar la última factura de la sesión o seleccionar otra. |
+| 4. Visualizar inventario | Consultar productos, stock, costo y precio de venta. |
+| 5. Consultar historial de auditoría | Ver las facturas registradas y sus estados. |
+| 6. Sembrar / indexar catálogo inicial | Cargar los productos iniciales y sus embeddings. |
+| 7. Salir | Cerrar la aplicación. |
 
-El agente dispone de **11 herramientas formales** construidas bajo el estándar `@tool` de LangChain:
+Durante una revisión puedes confirmar un candidato, buscar otro SKU existente, crear un producto o dejar el ítem omitido. También puedes usar `p` para pausar la sesión. Las correcciones se solicitan en consola antes de aplicar la decisión.
 
-| Tipo | Herramienta | Archivo Fuente | Descripción |
-| :---: | :--- | :--- | :--- |
-| **Consulta** | `extraer_factura_desde_imagen` | `src/tools/query_tools.py` | Extrae proveedor, folio e ítems (glosa, formato, cantidad, unidades por pack y precio) usando Gemini Vision. |
-| **Consulta** | `consultar_duplicidad_factura` | `src/tools/query_tools.py` | Verifica en Firestore si el folio existe, diferenciando `VERIFICADA_NUEVA`, `DUPLICADA` (solo si está `COMPLETADO`), `REINTENTO_CON_ERRORES` (`COMPLETADO_CON_ERRORES`), `FOLIO_ILEGIBLE` y `ERROR_CONSULTA`. |
-| **Consulta** | `buscar_candidatos_vectoriales` | `src/tools/query_tools.py` | Búsqueda semántica (Top 3) mediante distancia coseno en Firestore, calculando `similitud_vectorial`. |
-| **Consulta** | `consultar_producto_por_sku` | `src/tools/query_tools.py` | Inspecciona stock, costos y precios actuales de un producto en Firestore. |
-| **Consulta** | `consultar_equivalencia_proveedor` | `src/tools/query_tools.py` | Recupera equivalencias históricas aprobadas (`proveedor + glosa -> SKU`) desde `equivalencias_proveedor` para auto-homologar en futuras facturas. |
-| **Razonamiento** | `razonar_homologacion` | `src/tools/reasoning_tools.py` | Razona sobre abreviaturas comerciales, valida que el SKU pertenezca a los candidatos y calcula una única vez la puntuación heurística de confianza con la similitud vectorial. |
-| **Razonamiento** | `evaluar_variacion_costo` | `src/tools/reasoning_tools.py` | Detecta aumentos abruptos de costo ($>15\%$) para sugerir ajustes al precio de venta. |
-| **Escritura** | `actualizar_stock_y_costo` | `src/tools/write_tools.py` | Incrementa atómicamente el stock (`firestore.Increment`) y registra el movimiento (`proveedor + folio + línea`) en `movimientos_inventario` dentro de una misma transacción. |
-| **Escritura** | `registrar_nuevo_producto` | `src/tools/write_tools.py` | Da de alta un SKU nuevo con su vector de 384d y registra su movimiento (`proveedor + folio + línea`) en la misma transacción atómica. |
-| **Escritura** | `registrar_auditoria_factura` | `src/tools/write_tools.py` | Guarda o actualiza el comprobante transaccional en la colección `historial_facturas`. |
-| **Escritura** | `guardar_equivalencia_proveedor` | `src/tools/write_tools.py` | Persiste en `equivalencias_proveedor` la equivalencia aprobada entre `proveedor`, `glosa` y `SKU`. |
+El historial distingue resultados como `COMPLETADO`, `COMPLETADO_CON_ERRORES`, `PARCIAL`, `PENDIENTE_REVISION` y `ERROR_EXTRACCION`. El detalle por línea permite revisar qué se aplicó y qué requiere atención.
 
-### Controles de Robustez Implementados
-* **Control de Duplicidad, Reintento Selectivo y Fallos de Consulta:** Si una factura previa ya está `COMPLETADO`, se bloquea como duplicada (`DUPLICADA`); si quedó en `COMPLETADO_CON_ERRORES`, activa `REINTENTO_CON_ERRORES` para **omitir las líneas exitosas y retomar únicamente las líneas fallidas**; si el folio es ilegible (`FOLIO_ILEGIBLE`), continúa; y si falla la consulta a Firestore (`ERROR_CONSULTA`), aborta de forma segura con estado `ERROR`.
-* **Idempotencia Transaccional por Línea (`proveedor + folio + línea`):** El grafo envía siempre un `id_operacion` canónico (`PROVEEDOR::FOLIO::L<N>`) a todas las escrituras. Stock y movimiento (`movimientos_inventario`) se persisten en una **misma transacción de Firestore**, soportando múltiples líneas del mismo SKU en una factura y folios iguales de distintos proveedores sin duplicar stock en reintentos.
-* **Revisión Humana Mejorada y Aprendizaje de Equivalencias (*Human-in-the-Loop*):** Ante baja confianza ($<0.75$), solicitud de revisión o datos ilegibles, `node_intervencion_humana` muestra los candidatos recuperados con su similitud y costo actual, permitiendo **4 acciones operativas** sin generar duplicados en el catálogo: **(1)** confirmar uno de los candidatos, **(2)** buscar en el catálogo por texto o ingresar otro SKU existente validado en Firestore, **(3)** crear un producto nuevo, o **(4)** omitir el ítem (además de pausar la sesión en SQLite). Al confirmar o dar de alta un SKU para una glosa legible, la relación `proveedor + glosa -> SKU` queda guardada en `equivalencias_proveedor` para homologarse automáticamente en facturas futuras.
-* **Normalización de Costos y Manejo Riguroso de Packs:**
-  * **Distinción Explícita de Costos:** Se diferencia formalmente entre precio por pack (`POR_PACK`) y costo unitario individual (`POR_UNIDAD`). Si el valor facturado corresponde a un bulto, el sistema normaliza el costo unitario como `precio_pack / unidades_pack` antes de compararlo en `evaluar_variacion_costo` o persistirlo en `productos/{sku}`.
-    * *Ejemplo concreto:* Para 2 packs comprados de 6 unidades a un precio de \$12.000 por pack, el sistema ingresa **12 unidades de stock** (`2 * 6`) y almacena **\$2.000 como costo unitario** individual (`$12.000 / 6`), comparándolo contra el catálogo sin disparar falsas alarmas de incremento excesivo.
-  * **Detección y Resolución de Ambigüedades:** Si el precio de un pack es ambiguo, el agente lo compara automáticamente con el costo histórico del catálogo (resolviéndolo si coincide con una de las hipótesis dentro del margen de variación). De no existir catálogo previo o ser inconcluyente, delega la decisión a revisión humana (*Human-in-the-Loop*).
-  * **Validación Estricta de Unidades por Bulto:** Se eliminó cualquier reemplazo silencioso por `1` (`or 1`) en bultos o packs. Si una glosa o formato evidencia un empaque múltiple pero sus unidades no son legibles o son inválidas, el ítem se clasifica con campo ilegible (`"unidades por pack (bulto detectado sin unidades legibles)"`) y se desvía a revisión humana para proteger la integridad del inventario.
-* **Fortalecimiento del Manejo de Errores y Validación Estricta:**
-  * **Esquema Pydantic de Extracción:** Los datos multimodales se validan contra `FacturaExtraidaSchema` y `ItemFacturaExtraido` (encabezado, lista de ítems, cantidades y precios), tipando estrictamente cada atributo.
-  * **Distinción de Documentos sin Productos vs Fallo de Extracción:** Si una extracción no contiene ítems pero cuenta con encabezado formal de factura, se registra como `PENDIENTE_REVISION` en lugar de marcarse erróneamente como `COMPLETADO`; si la imagen es ilegible o el OCR falla por completo, se cataloga como `ERROR_EXTRACCION`. Ambos estados pertenecen a `_ESTADOS_REINTENTABLES`, por lo que `consultar_duplicidad_factura` jamás los bloquea como duplicados y permite su reintento o resolución manual.
-  * **Rechazo Estricto de Cantidades No Enteras (Cero Redondeo Silencioso):** La función `_parsear_entero_positivo` rechaza valores con parte fraccionaria (ej. `1.6`). En lugar de redondear silenciosamente a `2`, el ítem se clasifica con campo ilegible (`"cantidad (no es entero: 1.6)"`) y se deriva obligatoriamente a *Human-in-the-Loop* para que el operador digite la cantidad correcta sin corromper el inventario.
-  * **Reintentos Transaccionales Controlados en Firestore:** En `write_tools.py` (`actualizar_stock_y_costo` y `registrar_nuevo_producto`), ante fallos de contención o excepciones transitorias se aplican **hasta 3 reintentos con retroceso exponencial** (*exponential backoff*). Se eliminó cualquier degradación o fallback a escrituras directas no atómicas: si los reintentos se agotan, se preserva íntegramente el límite transaccional y se retorna `error_transaccional=True`, dejando el movimiento pendiente para auditoría.
-  * **Estados Granulares de Auditoría:** `node_registrar_auditoria` categoriza con precisión el resultado en `historial_facturas` entre `ERROR_EXTRACCION`, `PENDIENTE_REVISION`, `PARCIAL` (si quedan ítems pendientes o todos fueron omitidos), `COMPLETADO_CON_ERRORES` y `COMPLETADO`.
-* **Cálculo de Unidades por Pack y Verificación de Escritura:** El total de unidades a ingresar al inventario se calcula como `cantidad * unidades`. Además, `node_aplicar_cambios` verifica `resultado["exito"]` antes de marcar un ítem como `AUTO_HOMOLOGADO`, `ACTUALIZADO` o `CREADO_NUEVO` (registrando `ERROR_ESCRITURA` o `ERROR_TRANSACCIONAL` si la operación falla).
-* **Validación Estricta y Puntuación Heurística de Homologación:** Mediante el esquema Pydantic `ResultadoHomologacion`, `validar_estructura_homologacion` y `calcular_puntuacion_heuristica_confianza`, se comprueba que el `sku_seleccionado` pertenezca efectivamente a los candidatos recuperados de Firestore y se calcula **una única vez** una **puntuación heurística de confianza** combinando la estimación del LLM ($70\%$) con la similitud vectorial coseno ($30\%$). Este valor actúa como un puntaje operativo para decidir el paso a revisión humana (umbral $0.75$) y no representa una probabilidad estadísticamente calibrada de acierto.
+### Trazas opcionales
 
+Para activar LangSmith, configura una clave válida y cambia `LANGCHAIN_TRACING_V2=true` en `.env`. Sin esa combinación, `src/config.py` desactiva el tracing. Las trazas de las invocaciones instrumentadas se consultan en el proyecto indicado por `LANGCHAIN_PROJECT`.
 
-## 5. Estrategia de Memoria Dual y Continuidad Persistente
+## Escenarios para comprobar el funcionamiento
 
-* **Memoria de Trabajo Persistente (Checkpointer SQLite y Sesiones):**
-  * Implementada en `src/services/checkpointer.py` respaldada en **`data/checkpoints.sqlite`** (`SqliteSaver`).
-  * Cada ejecución se indexa bajo un `thread_id` registrado en SQLite (`sesiones_facturas`) y utiliza pausa/reanudación nativa de LangGraph mediante `interrupt()` y `Command(resume=...)`.
-  * Permite pausar una factura a mitad de camino, **cerrar completamente el programa**, volver a abrirlo y continuar desde la **Opción 2 ("Reanudar factura pendiente")** sin repetir la extracción OCR ni duplicar actualizaciones ya aplicadas.
-  * 📄 **Documentación detallada y protocolo de prueba:** Ver [`CONTINUIDAD_Y_MEMORIA.md`](./CONTINUIDAD_Y_MEMORIA.md).
-* **Memoria de Largo Plazo (Persistencia en Firestore):**
-  * **Semántica:** Colección `productos`, indexada con embeddings de 384 dimensiones generados por `SentenceTransformers` (`paraphrase-multilingual-MiniLM-L12-v2`).
-  * **Asociativa / Aprendizaje por Proveedor:** Colección `equivalencias_proveedor`, que almacena equivalencias aprobadas (`proveedor + glosa -> SKU`) para reutilizarlas automáticamente en facturas posteriores del mismo proveedor.
-  * **Transaccional / Episódica:** Colección `historial_facturas` (comprobantes de auditoría con estado `COMPLETADO` o `COMPLETADO_CON_ERRORES`) y colección `movimientos_inventario` (idempotencia atómica por `proveedor + folio + línea`).
+Estos pasos son una guía de comprobación manual. No representan pruebas automatizadas ni resultados ya obtenidos con servicios reales.
 
----
+| Escenario | Cómo comprobarlo | Qué revisar |
+| --- | --- | --- |
+| Compra reconocida | Procesar una factura con productos identificables y costos habituales. | SKU asignado, unidades ingresadas y auditoría. |
+| Factura duplicada | Repetir una factura completada mediante la opción 3. | Que el stock no vuelva a incrementarse. |
+| Descripción dudosa | Usar una glosa ambigua o un producto sin coincidencia clara. | Que se solicite revisión antes de escribir. |
+| Cambio de costo | Usar un costo unitario más de 15 % superior al del catálogo. | Que aparezca la alerta y se solicite confirmación. |
+| Pausa y continuidad | Pausar con `p`, cerrar el programa y reabrirlo con la opción 2. | Que se conserve el avance y continúe el ítem pendiente. |
+| Equivalencia aprendida | Confirmar una glosa y usarla en otra factura del mismo proveedor con un folio nuevo. | Que se recupere la equivalencia aprobada. |
+| Compra por pack | Usar cantidad, unidades por pack y tipo de precio conocidos. | Que stock y costo se calculen por unidad individual. |
 
-## 6. Observabilidad y Trazabilidad (LangSmith)
+Para conservar evidencia, registra los datos de entrada, el inventario antes y después, la salida de consola y el resultado de la auditoría.
 
-El sistema cuenta con instrumentación nativa de **LangSmith**:
-* Monitoreo en tiempo real de cada nodo del grafo, cadenas LCEL e invocaciones a herramientas.
-* Auditoría de tokens consumidos, tiempos de respuesta (latencia) y mensajes generados.
-* Proyecto configurado por defecto: `agente-facturas-botilleria`.
-
----
-
-## 7. Instalación y Configuración
-
-### 1. Requisitos Previos
-* Python 3.10+.
-* Proyecto activo en Google Firebase Firestore (con índice vectorial creado en la colección `productos` sobre el campo `embedding`, 384 dimensiones, distancia `COSINE`).
-* Clave de API de Google Gemini (`GOOGLE_API_KEY`).
-* Clave de API de Groq (`GROQ_API_KEY`) o de OpenAI (`OPENAI_API_KEY`).
-
-### 2. Clonación e Instalación
-```bash
-git clone https://github.com/brayamandres/agente_facturas_botilleria_LangGraph.git
-cd agente_facturas_botilleria_LangGraph
-pip install -r requirements.txt
-```
-
-### 3. Configuración de Variables de Entorno (`.env`)
-Crea un archivo `.env` en la raíz del proyecto con las siguientes variables:
-```ini
-# Credenciales Firebase (ruta al archivo JSON de cuenta de servicio)
-FIREBASE_CREDENTIALS_PATH=firebase_credentials.json
-
-# Credenciales LLM y Visión
-GOOGLE_API_KEY=tu_google_api_key
-GROQ_API_KEY=tu_groq_api_key
-OPENAI_API_KEY=tu_openai_api_key
-
-# Trazabilidad LangSmith (Opcional)
-LANGSMITH_API_KEY=tu_langsmith_api_key
-LANGCHAIN_PROJECT=agente-facturas-botilleria
-```
-
-Coloca tu archivo `.json` de credenciales de Firebase en la raíz del proyecto (está protegido por `.gitignore`, mientras que `src/services/seed_data.json` sí está versionado para sembrar el catálogo inicial).
-
----
-
-## 8. Ejecución y Modo de Uso
-
-Para iniciar el sistema desde la interfaz de línea de comandos (CLI):
-
-```bash
-python main.py
-```
-
-El menú interactivo dispone de **7 opciones**:
-1. **Procesar una factura nueva (Ejecutar Agente LangGraph):** Permite elegir cualquier factura disponible en `/data` y ejecutar el flujo completo (pudiendo pausar en cualquier *Human-in-the-Loop* con `p`).
-2. **Reanudar factura pendiente:** Recupera desde SQLite las sesiones pausadas, muestra los ítems ya aplicados, la bitácora previa y los ítems pendientes, y retoma la ejecución con `Command(resume=...)`.
-3. **Probar control de duplicados:** Re-procesa automáticamente la última factura procesada en la sesión (o permite seleccionar una) para demostrar el bloqueo adaptativo ante duplicados.
-4. **Visualizar inventario en Firestore:** Lista los productos actuales del catálogo con su SKU, stock, costo y precio de venta.
-5. **Consultar historial de auditoría:** Muestra las facturas registradas en la colección `historial_facturas`.
-6. **Sembrar / Indexar catálogo inicial con Embeddings en Firestore:** Carga los 40 productos base desde `src/services/seed_data.json` calculando sus embeddings de 384 dimensiones.
-7. **Salir:** Finaliza la aplicación.
-
----
-
-## 9. Estructura del Proyecto
+## Estructura del proyecto
 
 ```text
-agente_facturas_botilleria_LangGraph/
-├── data/                           # Facturas en imagen y persistencia SQLite local
-│   ├── factura1.png                # Factura de prueba incluida en el repositorio
-│   ├── checkpoints.sqlite          # Checkpoints LangGraph y sesiones (generado al ejecutar)
-│   └── optimizado/                 # Imágenes redimensionadas automáticamente por PIL
+.
+├── main.py                         # Menú y ejecución de sesiones
+├── requirements.txt                # Dependencias
+├── .env.example                    # Variables de configuración de ejemplo
+├── data/                           # Imágenes y SQLite local generado al ejecutar
 ├── src/
-│   ├── __init__.py
-│   ├── config.py                   # Variables de entorno, rutas SQLite, modelos IA y LangSmith
-│   ├── agent/                      # Orquestador LangGraph
-│   │   ├── __init__.py
-│   │   ├── state.py                # Definición del Estado Tipado (AgentState)
-│   │   └── graph.py                # Nodos, interrupt() HITL, bordes condicionales y grafo SQLite
-│   ├── services/                   # Clientes, persistencia y conexiones externas
-│   │   ├── __init__.py
-│   │   ├── checkpointer.py         # Checkpointer persistente SQLite y catálogo de sesiones
-│   │   ├── firebase.py             # Cliente Firestore Singleton y colecciones
-│   │   ├── gemini.py               # Cliente Gemini Vision y preprocesamiento PIL
-│   │   ├── llm.py                  # LLM para razonamiento (Groq / OpenAI)
-│   │   ├── embeddings.py           # Modelo SentenceTransformers (384d)
-│   │   ├── seed.py                 # Script de siembra e indexación vectorial
-│   │   └── seed_data.json          # Catálogo inicial de 40 productos de botillería
-│   └── tools/                      # Herramientas del agente (@tool)
-│       ├── __init__.py
-│       ├── query_tools.py          # Consulta (visión, duplicidad, búsqueda vectorial, SKU)
-│       ├── reasoning_tools.py      # Razonamiento (homologación validada, variación de costo)
-│       └── write_tools.py          # Escritura transaccional (stock atómico, alta SKU, auditoría)
-├── main.py                         # Punto de entrada interactivo CLI (7 opciones + Command resume)
-├── requirements.txt                # Dependencias del proyecto
-├── CONTINUIDAD_Y_MEMORIA.md        # Documentación técnica y guía de continuidad SQLite / HITL
-└── README.md                       # Documentación general del sistema
+│   ├── config.py                   # Rutas, modelos y configuración
+│   ├── agent/
+│   │   ├── state.py                # Estado compartido entre nodos
+│   │   ├── graph.py                # Flujo, revisión humana y rutas condicionales
+│   │   └── planning_policy.py      # Reglas de decisión por prioridad
+│   ├── services/
+│   │   ├── checkpointer.py         # Checkpoints SQLite y registro de sesiones
+│   │   ├── firebase.py             # Cliente y colecciones de Firestore
+│   │   ├── gemini.py               # Lectura de imágenes y validación de extracción
+│   │   ├── llm.py                  # Modelo de razonamiento
+│   │   ├── embeddings.py           # Generación de vectores
+│   │   ├── seed.py                 # Carga del catálogo inicial
+│   │   └── seed_data.json          # Datos de los 40 productos iniciales
+│   └── tools/
+│       ├── query_tools.py          # Herramientas de consulta
+│       ├── reasoning_tools.py      # Homologación y análisis de costos
+│       └── write_tools.py          # Inventario, auditoría y equivalencias
+└── firestore_products.ipynb        # Cuaderno de carga y consulta del catálogo
 ```
+
+## Referencias
+
+Google. (s. f.). *[Image understanding](https://ai.google.dev/gemini-api/docs/image-understanding)*. Google AI for Developers.
+
+Google. (s. f.). *[Search with vector embeddings](https://firebase.google.com/docs/firestore/vector-search)*. Firebase.
+
+LangChain. (s. f.-a). *[LangGraph overview](https://docs.langchain.com/oss/python/langgraph/overview)*.
+
+LangChain. (s. f.-b). *[Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)*.
