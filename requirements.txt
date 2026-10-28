@@ -5,9 +5,12 @@ langchain-core
 langchain-openai
 langchain-google-genai
 langgraph
+langgraph-checkpoint-sqlite
 google-genai
 sentence-transformers
 groq
 pillow
 python-dotenv
+colorist
+
 colorist

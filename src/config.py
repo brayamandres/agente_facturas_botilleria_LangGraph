@@ -4,12 +4,13 @@ from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env en la raíz del proyecto
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
+load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
 
 # Rutas de datos
 DATA_DIR = BASE_DIR / "data"
 DATA_OPTIMIZADO_DIR = DATA_DIR / "optimizado"
 DATA_OPTIMIZADO_DIR.mkdir(parents=True, exist_ok=True)
+CHECKPOINT_DB_PATH = DATA_DIR / "checkpoints.sqlite"
 
 # Claves de APIs
 FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH")
@@ -19,13 +20,15 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
 
 # Configuración de observabilidad con LangSmith
-if LANGSMITH_API_KEY and not LANGSMITH_API_KEY.startswith("YOUR_"):
+tracing_env = os.getenv("LANGCHAIN_TRACING_V2", "").lower()
+if tracing_env in ("true", "1", "yes") and LANGSMITH_API_KEY and not LANGSMITH_API_KEY.startswith("YOUR_"):
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
     os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
     os.environ["LANGCHAIN_API_KEY"] = LANGSMITH_API_KEY
     os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "agente-facturas-botilleria")
 else:
     os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
 
 # Parámetros del modelo de embeddings
 EMBEDDING_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
